@@ -12,7 +12,7 @@
 
 import { execSync } from "node:child_process";
 import { copyToClipboard, CustomEditor, type ExtensionAPI, type Theme } from "@mariozechner/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 const SEQ = {
 	left: "\x1b[D",
@@ -920,8 +920,12 @@ class ModalEditor extends CustomEditor {
 			result.push(horizontal.repeat(width));
 		}
 
+		const emitCursorMarker = this.focused;
 		for (const segment of visibleSegments) {
-			const highlighted = this.applyVisualHighlight(segment.text, segment, offsets, selection);
+			let highlighted = this.applyVisualHighlight(segment.text, segment, offsets, selection);
+			if (emitCursorMarker && segment.hasCursor) {
+				highlighted = `${CURSOR_MARKER}${highlighted}`;
+			}
 			const lineWidth = visibleWidth(highlighted);
 			const padding = " ".repeat(Math.max(0, contentWidth - lineWidth));
 			result.push(`${leftPadding}${highlighted}${padding}${rightPadding}`);

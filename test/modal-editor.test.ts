@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import type { ExtensionAPI, Theme } from "@mariozechner/pi-coding-agent";
-import type { EditorTheme } from "@mariozechner/pi-tui";
+import { CURSOR_MARKER, type EditorTheme } from "@mariozechner/pi-tui";
 import modalEditorExtension from "../src/index.ts";
 
 type TestEditor = {
@@ -9,6 +9,11 @@ type TestEditor = {
 	setText: (text: string) => void;
 	getText: () => string;
 	getCursor: () => { line: number; col: number };
+};
+
+type RenderableEditor = TestEditor & {
+	focused: boolean;
+	render: (width: number) => string[];
 };
 
 type EditorFactory = (tui: unknown, theme: EditorTheme, keybindings: unknown) => TestEditor;
@@ -162,6 +167,16 @@ describe("modal-editor extension motions", () => {
 		press(editor, "\x1b", "0", "v", "2", "l", "y");
 		press(editor, "0", "v", "1", "l", "p");
 		assert.equal(editor.getText(), "abccdef");
+	});
+
+	it("emits a cursor marker in visual mode so resize redraws keep cursor row in sync", () => {
+		editor.setText("alpha beta gamma");
+		press(editor, "\x1b", "0", "v");
+
+		const renderable = editor as RenderableEditor;
+		renderable.focused = true;
+		const lines = renderable.render(40);
+		assert.ok(lines.some((line) => line.includes(CURSOR_MARKER)));
 	});
 
 	it("supports undo/redo with u and U", () => {
