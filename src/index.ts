@@ -171,6 +171,11 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 
+		if (this.pendingOperator === "d" && data === "0" && this.pendingCount.length === 0) {
+			this.handleDeleteOperator(data);
+			return;
+		}
+
 		if (data.length === 1 && data >= "0" && data <= "9") {
 			if (data === "0" && this.pendingCount.length === 0 && !this.pendingOperator) {
 				this.send(SEQ.lineStart);
@@ -433,6 +438,36 @@ class ModalEditor extends CustomEditor {
 				this.resetPending();
 				return;
 			}
+			case "h": {
+				const motionCount = this.consumeCount();
+				const total = Math.max(1, this.pendingOperatorCount * motionCount);
+				this.deleteCharsBackward(total);
+				return;
+			}
+			case "$": {
+				const motionCount = this.consumeCount();
+				const total = Math.max(1, this.pendingOperatorCount * motionCount);
+				this.deleteToLineEnd(total);
+				return;
+			}
+			case "0": {
+				const motionCount = this.consumeCount();
+				const total = Math.max(1, this.pendingOperatorCount * motionCount);
+				this.deleteToLineStart(total);
+				return;
+			}
+			case "j": {
+				const motionCount = this.consumeCount();
+				const total = Math.max(1, this.pendingOperatorCount * motionCount);
+				this.deleteLinesDown(total);
+				return;
+			}
+			case "k": {
+				const motionCount = this.consumeCount();
+				const total = Math.max(1, this.pendingOperatorCount * motionCount);
+				this.deleteLinesUp(total);
+				return;
+			}
 			case "f":
 				this.pendingFind = "f";
 				return;
@@ -454,7 +489,8 @@ class ModalEditor extends CustomEditor {
 
 		let foundIndex = -1;
 		let from = col + 1;
-		const searchRepeats = Math.max(1, occurrenceCount);
+		const searchRepeats =
+			Math.max(1, occurrenceCount) * (operator === "d" ? Math.max(1, this.pendingOperatorCount) : 1);
 
 		for (let i = 0; i < searchRepeats; i++) {
 			foundIndex = currentLine.indexOf(targetChar, from);
@@ -471,11 +507,10 @@ class ModalEditor extends CustomEditor {
 		}
 
 		if (operator === "d") {
-			const opCount = Math.max(1, this.pendingOperatorCount);
-			const totalDeletesForOneMotion =
+			const totalDeletesForMotion =
 				findType === "f" ? Math.max(0, foundIndex - col + 1) : Math.max(0, foundIndex - col);
 			this.withTrackedEdit(() => {
-				this.send(SEQ.deleteCharForward, totalDeletesForOneMotion * opCount);
+				this.send(SEQ.deleteCharForward, totalDeletesForMotion);
 			});
 			this.resetPending();
 			return;
@@ -488,14 +523,8 @@ class ModalEditor extends CustomEditor {
 	}
 
 	private deleteCurrentLine(count: number): void {
-		this.withTrackedEdit(() => {
-			this.send(SEQ.lineStart);
-			for (let i = 0; i < count; i++) {
-				this.send(SEQ.deleteToEnd);
-				this.send(SEQ.deleteToEnd);
-			}
-		});
-		this.resetPending();
+		const cursor = this.getCursor();
+		this.deleteLinesAt(cursor.line, Math.max(1, count));
 	}
 
 	private deleteToLineEnd(count: number): void {
@@ -506,6 +535,68 @@ class ModalEditor extends CustomEditor {
 				this.send(SEQ.deleteToEnd);
 				this.send(SEQ.deleteToEnd);
 			}
+		});
+		this.resetPending();
+	}
+
+	private deleteToLineStart(_count: number): void {
+		const cursor = this.getCursor();
+		if (cursor.col <= 0) {
+			this.resetPending();
+			return;
+		}
+
+		this.withTrackedEdit(() => {
+			const lines = this.getLines();
+			const currentLine = lines[cursor.line] ?? "";
+			lines[cursor.line] = currentLine.slice(cursor.col);
+			this.setTextAndMoveCursor(lines.join("\n"), { line: cursor.line, col: 0 });
+		});
+		this.resetPending();
+	}
+
+	private deleteCharsBackward(count: number): void {
+		const cursor = this.getCursor();
+		if (cursor.col <= 0) {
+			this.resetPending();
+			return;
+		}
+
+		const deleteCount = Math.min(Math.max(1, count), cursor.col);
+		this.withTrackedEdit(() => {
+			const lines = this.getLines();
+			const currentLine = lines[cursor.line] ?? "";
+			const start = cursor.col - deleteCount;
+			lines[cursor.line] = currentLine.slice(0, start) + currentLine.slice(cursor.col);
+			this.setTextAndMoveCursor(lines.join("\n"), { line: cursor.line, col: start });
+		});
+		this.resetPending();
+	}
+
+	private deleteLinesDown(count: number): void {
+		const cursor = this.getCursor();
+		this.deleteLinesAt(cursor.line, Math.max(1, count) + 1);
+	}
+
+	private deleteLinesUp(count: number): void {
+		const cursor = this.getCursor();
+		const startLine = Math.max(0, cursor.line - Math.max(1, count));
+		const linesToDelete = cursor.line - startLine + 1;
+		this.deleteLinesAt(startLine, linesToDelete);
+	}
+
+	private deleteLinesAt(startLine: number, count: number): void {
+		const deleteCount = Math.max(1, count);
+		this.withTrackedEdit(() => {
+			const lines = this.getLines();
+			const clampedStart = Math.max(0, Math.min(startLine, lines.length - 1));
+			const endExclusive = Math.min(lines.length, clampedStart + deleteCount);
+			const remaining = [...lines.slice(0, clampedStart), ...lines.slice(endExclusive)];
+			if (remaining.length === 0) {
+				remaining.push("");
+			}
+			const nextLine = Math.max(0, Math.min(clampedStart, remaining.length - 1));
+			this.setTextAndMoveCursor(remaining.join("\n"), { line: nextLine, col: 0 });
 		});
 		this.resetPending();
 	}
@@ -544,6 +635,7 @@ class ModalEditor extends CustomEditor {
 			for (let i = 0; i < count; i++) {
 				this.send(SEQ.lineStart);
 				this.send(SEQ.newLine);
+				this.send(SEQ.up);
 			}
 		});
 		this.mode = "insert";
@@ -553,8 +645,22 @@ class ModalEditor extends CustomEditor {
 	private joinWithNextLine(count: number): void {
 		this.withTrackedEdit(() => {
 			for (let i = 0; i < count; i++) {
+				const cursor = this.getCursor();
+				const lines = this.getLines();
+				if (cursor.line >= lines.length - 1) {
+					break;
+				}
+
+				const currentLine = lines[cursor.line] ?? "";
+				const nextLine = lines[cursor.line + 1] ?? "";
+				const shouldInsertSpace =
+					currentLine.length > 0 && nextLine.length > 0 && !/\s$/.test(currentLine) && !/^\s/.test(nextLine);
+
 				this.send(SEQ.lineEnd);
 				this.send(SEQ.deleteToEnd);
+				if (shouldInsertSpace) {
+					super.handleInput(" ");
+				}
 			}
 		});
 		this.resetPending();
@@ -883,6 +989,26 @@ class ModalEditor extends CustomEditor {
 		return `${text.slice(0, localStart)}\x1b[7m${text.slice(localStart, localEnd)}\x1b[0m${text.slice(localEnd)}`;
 	}
 
+	private insertMarkerAtCursorColumn(text: string, cursorCol: number, plainLength: number): string {
+		const clampedCol = Math.max(0, Math.min(cursorCol, plainLength));
+		let textIndex = 0;
+		let plainIndex = 0;
+
+		while (textIndex < text.length && plainIndex < clampedCol) {
+			if (text[textIndex] === "\x1b") {
+				const csiMatch = text.slice(textIndex).match(/^\x1b\[[0-9;]*m/);
+				if (csiMatch) {
+					textIndex += csiMatch[0].length;
+					continue;
+				}
+			}
+			textIndex += 1;
+			plainIndex += 1;
+		}
+
+		return `${text.slice(0, textIndex)}${CURSOR_MARKER}${text.slice(textIndex)}`;
+	}
+
 	private renderVisualMode(width: number): string[] {
 		const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
 		const paddingX = Math.min(this.getPaddingX(), maxPadding);
@@ -928,7 +1054,7 @@ class ModalEditor extends CustomEditor {
 		for (const segment of visibleSegments) {
 			let highlighted = this.applyVisualHighlight(segment.text, segment, offsets, selection);
 			if (emitCursorMarker && segment.hasCursor) {
-				highlighted = `${CURSOR_MARKER}${highlighted}`;
+				highlighted = this.insertMarkerAtCursorColumn(highlighted, segment.cursorPos ?? 0, segment.text.length);
 			}
 			const lineWidth = visibleWidth(highlighted);
 			const padding = " ".repeat(Math.max(0, contentWidth - lineWidth));

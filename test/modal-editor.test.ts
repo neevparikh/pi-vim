@@ -191,6 +191,64 @@ describe("modal-editor extension motions", () => {
 		assert.notEqual(editor.getCursor().col, 0);
 	});
 
+	it("opens a line above with O and enters insert mode on the new blank line", () => {
+		editor.setText("a\nb");
+		press(editor, "\x1b", "0", "O", "X", "\x1b");
+		assert.equal(editor.getText(), "a\nX\nb");
+	});
+
+	it("combines operator and motion counts for d f/t motions", () => {
+		editor.setText("abcgxgyz");
+		press(editor, "\x1b", "0", "2", "d", "f", "g");
+		assert.equal(editor.getText(), "yz");
+	});
+
+	it("joins lines with a separating space on J", () => {
+		editor.setText("hello\nworld");
+		press(editor, "\x1b", "k", "J");
+		assert.equal(editor.getText(), "hello world");
+	});
+
+	it("deletes only the empty current line for dd", () => {
+		editor.setText("a\n\nb\nc");
+		press(editor, "\x1b", "k", "k", "d", "d");
+		assert.equal(editor.getText(), "a\nb\nc");
+	});
+
+	it("supports common delete motions d$, d0, dh, dj, dk", () => {
+		editor.setText("abcdef");
+		press(editor, "\x1b", "0", "3", "l", "d", "$");
+		assert.equal(editor.getText(), "abc");
+
+		editor.setText("abcdef");
+		press(editor, "\x1b", "0", "4", "l", "d", "0");
+		assert.equal(editor.getText(), "ef");
+
+		editor.setText("abcdef");
+		press(editor, "\x1b", "0", "4", "l", "d", "h");
+		assert.equal(editor.getText(), "abcef");
+
+		editor.setText("a\nb\nc\nd");
+		press(editor, "\x1b", "k", "k", "d", "j");
+		assert.equal(editor.getText(), "a\nd");
+
+		editor.setText("a\nb\nc\nd");
+		press(editor, "\x1b", "k", "d", "k");
+		assert.equal(editor.getText(), "a\nd");
+	});
+
+	it("places the visual-mode cursor marker at the actual cursor column", () => {
+		editor.setText("abcdef");
+		press(editor, "\x1b", "0", "3", "l", "v");
+
+		const renderable = editor as RenderableEditor;
+		renderable.focused = true;
+		const lines = renderable.render(20);
+		const markerLine = lines.find((line) => line.includes(CURSOR_MARKER));
+		assert.ok(markerLine);
+		assert.ok(markerLine.indexOf(CURSOR_MARKER) > 0);
+	});
+
 	it("supports undo/redo with u and U", () => {
 		editor.setText("abcdef");
 		press(editor, "\x1b", "0", "x");
