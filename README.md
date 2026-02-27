@@ -1,5 +1,7 @@
 # pi-vim
 
+[![CI](https://github.com/neevparikh/pi-vim/actions/workflows/test.yml/badge.svg)](https://github.com/neevparikh/pi-vim/actions/workflows/test.yml)
+
 Vim-style editor extension for pi.
 
 ## Install as a pi package (local path)
