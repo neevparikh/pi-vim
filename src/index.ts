@@ -889,6 +889,10 @@ class ModalEditor extends CustomEditor {
 		const contentWidth = Math.max(1, width - paddingX * 2);
 		const layoutWidth = Math.max(1, contentWidth - (paddingX ? 0 : 1));
 
+		// Keep Editor's internal wrap width in sync while visual mode uses a custom renderer.
+		// Cursor movement handlers (up/down, page keys, etc.) depend on this value.
+		(this as unknown as { lastWidth: number }).lastWidth = layoutWidth;
+
 		const segments = this.buildWrappedSegments(layoutWidth);
 		const cursorLineIndex = Math.max(0, segments.findIndex((segment) => segment.hasCursor));
 

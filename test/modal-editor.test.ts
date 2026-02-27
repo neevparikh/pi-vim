@@ -179,6 +179,18 @@ describe("modal-editor extension motions", () => {
 		assert.ok(lines.some((line) => line.includes(CURSOR_MARKER)));
 	});
 
+	it("uses resized wrap width for visual-mode vertical movement", () => {
+		editor.setText("12345678901234567890");
+		press(editor, "\x1b", "v");
+
+		const renderable = editor as RenderableEditor;
+		renderable.focused = true;
+		renderable.render(10); // simulate narrow terminal resize
+
+		press(editor, "k");
+		assert.notEqual(editor.getCursor().col, 0);
+	});
+
 	it("supports undo/redo with u and U", () => {
 		editor.setText("abcdef");
 		press(editor, "\x1b", "0", "x");
