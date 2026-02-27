@@ -1,0 +1,25 @@
+{
+  "name": "pi-extension-vim",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {
+    "test": "tsx --test test/**/*.test.ts"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.55.1",
+    "@mariozechner/pi-tui": "^0.55.1",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2"
+  }
+}
