@@ -116,7 +116,7 @@ describe("modal-editor extension motions", () => {
 		assert.deepEqual(editor.getCursor(), { line: 1, col: 1 });
 	});
 
-	it("supports word/find motions w, b, e, E, f<char>, t<char>", () => {
+	it("supports word/find motions w, b/B, e, E, f/F<char>, t/T<char>", () => {
 		editor.setText("alpha beta gamma");
 		press(editor, "\x1b", "0");
 
@@ -138,8 +138,42 @@ describe("modal-editor extension motions", () => {
 		press(editor, "0", "f", "g");
 		assert.equal(editor.getCursor().col, 11);
 
+		press(editor, "F", "b");
+		assert.equal(editor.getCursor().col, 6);
+
+		press(editor, "T", "a");
+		assert.equal(editor.getCursor().col, 5);
+
 		press(editor, "0", "t", "g");
 		assert.equal(editor.getCursor().col, 10);
+
+		editor.setText("foo/bar baz");
+		press(editor, "0", "$", "B");
+		assert.equal(editor.getCursor().col, 8);
+
+		press(editor, "B");
+		assert.equal(editor.getCursor().col, 0);
+
+		editor.setText("xabc");
+		press(editor, "0", "F", "x");
+		assert.equal(editor.getCursor().col, 0);
+		press(editor, "T", "x");
+		assert.equal(editor.getCursor().col, 0);
+	});
+
+	it("supports count with backward find motions F/T", () => {
+		editor.setText("XabcXdefXghi");
+		press(editor, "\x1b", "0", "$", "2", "F", "X");
+		assert.equal(editor.getCursor().col, 4);
+
+		press(editor, "0", "$", "2", "T", "X");
+		assert.equal(editor.getCursor().col, 5);
+	});
+
+	it("supports B across line boundaries", () => {
+		editor.setText("one two\nthree four");
+		press(editor, "\x1b", "0", "B");
+		assert.deepEqual(editor.getCursor(), { line: 0, col: 4 });
 	});
 
 	it("supports count with delete motion", () => {
@@ -154,6 +188,19 @@ describe("modal-editor extension motions", () => {
 		const before = editor.getCursor().col;
 		press(editor, "E");
 		assert.ok(editor.getCursor().col > before);
+	});
+
+	it("supports B/F/T motions in visual mode", () => {
+		editor.setText("alpha beta gamma");
+		press(editor, "\x1b", "0", "v", "$", "F", "b");
+		assert.equal(editor.getCursor().col, 6);
+
+		press(editor, "T", "a");
+		assert.equal(editor.getCursor().col, 5);
+
+		editor.setText("foo/bar baz");
+		press(editor, "0", "v", "$", "B");
+		assert.equal(editor.getCursor().col, 8);
 	});
 
 	it("copies visual selection with y and pastes with p", () => {
@@ -197,10 +244,34 @@ describe("modal-editor extension motions", () => {
 		assert.equal(editor.getText(), "a\nX\nb");
 	});
 
-	it("combines operator and motion counts for d f/t motions", () => {
+	it("supports d with b/B and f/F/t/T motions, including count composition", () => {
 		editor.setText("abcgxgyz");
 		press(editor, "\x1b", "0", "2", "d", "f", "g");
 		assert.equal(editor.getText(), "yz");
+
+		editor.setText("abcXdefXghi");
+		press(editor, "\x1b", "0", "$", "2", "d", "F", "X");
+		assert.equal(editor.getText(), "abc");
+
+		editor.setText("abcXdefXghi");
+		press(editor, "\x1b", "0", "$", "d", "T", "X");
+		assert.equal(editor.getText(), "abcXdefX");
+
+		editor.setText("foo/bar baz");
+		press(editor, "\x1b", "0", "$", "d", "B");
+		assert.equal(editor.getText(), "foo/bar ");
+
+		editor.setText("foo/bar baz");
+		press(editor, "\x1b", "0", "9", "l", "d", "B");
+		assert.equal(editor.getText(), "foo/bar az");
+
+		editor.setText("aa bb cc dd");
+		press(editor, "\x1b", "0", "$", "2", "d", "B");
+		assert.equal(editor.getText(), "aa bb ");
+
+		editor.setText("xabc");
+		press(editor, "\x1b", "0", "d", "F", "x");
+		assert.equal(editor.getText(), "xabc");
 	});
 
 	it("joins lines with a separating space on J", () => {

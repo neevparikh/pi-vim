@@ -4,7 +4,7 @@
  * - Escape: insert -> normal mode (in normal mode, aborts agent when no pending command)
  * - Modes: normal, insert, visual
  * - Counts: e.g. 2l, 3w, 2dd
- * - Motions: h j k l, 0, $, w, b, e/E, f<char>, t<char>
+ * - Motions: h j k l, 0, $, w, b/B, e/E, f/F<char>, t/T<char>
  * - Editing: x, d + motion, dd, D, i, I, a, A, o, O, J
  * - Undo/redo: u / U
  * - Clipboard: y/Y copy, p paste (works in visual mode too)
@@ -32,7 +32,7 @@ const SEQ = {
 
 type Mode = "normal" | "insert" | "visual";
 type PendingOperator = "d" | null;
-type PendingFind = "f" | "t" | null;
+type PendingFind = "f" | "F" | "t" | "T" | null;
 
 interface Pos {
 	line: number;
@@ -245,14 +245,23 @@ class ModalEditor extends CustomEditor {
 			case "b":
 				this.send(SEQ.wordBackward, this.consumeCount());
 				return;
+			case "B":
+				this.moveBigWordBackward(this.consumeCount());
+				return;
 			case "e":
 				this.send(SEQ.wordForward, this.consumeCount());
 				return;
 			case "f":
 				this.pendingFind = "f";
 				return;
+			case "F":
+				this.pendingFind = "F";
+				return;
 			case "t":
 				this.pendingFind = "t";
+				return;
+			case "T":
+				this.pendingFind = "T";
 				return;
 			case "x":
 				this.withTrackedEdit(() => {
@@ -372,14 +381,23 @@ class ModalEditor extends CustomEditor {
 			case "b":
 				this.send(SEQ.wordBackward, this.consumeCount());
 				return;
+			case "B":
+				this.moveBigWordBackward(this.consumeCount());
+				return;
 			case "e":
 				this.send(SEQ.wordForward, this.consumeCount());
 				return;
 			case "f":
 				this.pendingFind = "f";
 				return;
+			case "F":
+				this.pendingFind = "F";
+				return;
 			case "t":
 				this.pendingFind = "t";
+				return;
+			case "T":
+				this.pendingFind = "T";
 				return;
 			default:
 				if (data.length === 1 && data.charCodeAt(0) >= 32) {
@@ -429,6 +447,12 @@ class ModalEditor extends CustomEditor {
 				this.resetPending();
 				return;
 			}
+			case "B": {
+				const motionCount = this.consumeCount();
+				const total = Math.max(1, this.pendingOperatorCount * motionCount);
+				this.deleteBigWordBackward(total);
+				return;
+			}
 			case "l": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
@@ -471,8 +495,14 @@ class ModalEditor extends CustomEditor {
 			case "f":
 				this.pendingFind = "f";
 				return;
+			case "F":
+				this.pendingFind = "F";
+				return;
 			case "t":
 				this.pendingFind = "t";
+				return;
+			case "T":
+				this.pendingFind = "T";
 				return;
 			default:
 				this.resetPending();
@@ -487,26 +517,39 @@ class ModalEditor extends CustomEditor {
 		const { line, col } = this.getCursor();
 		const currentLine = this.getLines()[line] ?? "";
 
-		let foundIndex = -1;
-		let from = col + 1;
-		const searchRepeats =
-			Math.max(1, occurrenceCount) * (operator === "d" ? Math.max(1, this.pendingOperatorCount) : 1);
-
-		for (let i = 0; i < searchRepeats; i++) {
-			foundIndex = currentLine.indexOf(targetChar, from);
-			if (foundIndex < 0) {
-				this.resetPending();
-				return;
-			}
-			from = foundIndex + 1;
-		}
-
 		if (!findType) {
 			this.resetPending();
 			return;
 		}
 
+		const isBackward = findType === "F" || findType === "T";
+		let foundIndex = -1;
+		let from = isBackward ? col - 1 : col + 1;
+		const searchRepeats =
+			Math.max(1, occurrenceCount) * (operator === "d" ? Math.max(1, this.pendingOperatorCount) : 1);
+
+		if (isBackward && from < 0) {
+			this.resetPending();
+			return;
+		}
+
+		for (let i = 0; i < searchRepeats; i++) {
+			foundIndex = isBackward ? currentLine.lastIndexOf(targetChar, from) : currentLine.indexOf(targetChar, from);
+			if (foundIndex < 0) {
+				this.resetPending();
+				return;
+			}
+			from = isBackward ? foundIndex - 1 : foundIndex + 1;
+		}
+
 		if (operator === "d") {
+			if (isBackward) {
+				const targetStart = findType === "F" ? foundIndex : Math.min(col, foundIndex + 1);
+				const deleteEnd = col + (col < currentLine.length ? 1 : 0);
+				this.deleteRangeInCurrentLine(targetStart, deleteEnd);
+				return;
+			}
+
 			const totalDeletesForMotion =
 				findType === "f" ? Math.max(0, foundIndex - col + 1) : Math.max(0, foundIndex - col);
 			this.withTrackedEdit(() => {
@@ -516,9 +559,95 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 
+		if (isBackward) {
+			const targetCol = findType === "F" ? foundIndex : Math.min(col, foundIndex + 1);
+			const steps = Math.max(0, col - targetCol);
+			this.send(SEQ.left, steps);
+			this.resetPending();
+			return;
+		}
+
 		const targetCol = findType === "f" ? foundIndex : Math.max(col, foundIndex - 1);
 		const steps = Math.max(0, targetCol - col);
 		this.send(SEQ.right, steps);
+		this.resetPending();
+	}
+
+	private moveBigWordBackward(count: number): void {
+		const repeats = Math.max(1, count);
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+		const fullText = lines.join("\n");
+		const fromIndex = this.posToIndex(lines, cursor);
+		const targetIndex = this.findBigWordStartBackward(fullText, fromIndex, repeats);
+		this.moveCursorTo(this.indexToPos(fullText, targetIndex));
+		this.resetPending();
+	}
+
+	private deleteBigWordBackward(count: number): void {
+		const repeats = Math.max(1, count);
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+		const fullText = lines.join("\n");
+		const cursorIndex = this.posToIndex(lines, cursor);
+		const targetIndex = this.findBigWordStartBackward(fullText, cursorIndex, repeats);
+		const deleteEnd = cursorIndex;
+
+		if (targetIndex >= deleteEnd) {
+			this.resetPending();
+			return;
+		}
+
+		this.withTrackedEdit(() => {
+			const nextText = fullText.slice(0, targetIndex) + fullText.slice(deleteEnd);
+			this.setTextAndMoveCursor(nextText, this.indexToPos(nextText, targetIndex));
+		});
+		this.resetPending();
+	}
+
+	private findBigWordStartBackward(text: string, fromIndex: number, repeats: number): number {
+		let index = Math.max(0, Math.min(fromIndex, text.length));
+		const steps = Math.max(1, repeats);
+
+		for (let step = 0; step < steps; step++) {
+			if (index <= 0) {
+				return 0;
+			}
+
+			let probe = index - 1;
+			while (probe >= 0 && isWhitespaceChar(text[probe] ?? "")) {
+				probe -= 1;
+			}
+			if (probe < 0) {
+				return 0;
+			}
+
+			while (probe >= 0 && !isWhitespaceChar(text[probe] ?? "")) {
+				probe -= 1;
+			}
+			index = probe + 1;
+		}
+
+		return index;
+	}
+
+	private deleteRangeInCurrentLine(startCol: number, endColExclusive: number): void {
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+		const currentLine = lines[cursor.line] ?? "";
+		const lineLength = currentLine.length;
+		const start = Math.max(0, Math.min(startCol, lineLength));
+		const end = Math.max(start, Math.min(endColExclusive, lineLength));
+
+		if (start >= end) {
+			this.resetPending();
+			return;
+		}
+
+		this.withTrackedEdit(() => {
+			lines[cursor.line] = currentLine.slice(0, start) + currentLine.slice(end);
+			this.setTextAndMoveCursor(lines.join("\n"), { line: cursor.line, col: start });
+		});
 		this.resetPending();
 	}
 
@@ -1129,8 +1258,10 @@ class ModalEditor extends CustomEditor {
 	}
 
 	private send(seq: string, count: number = 1): void {
-		const repeats = Math.max(1, count);
-		for (let i = 0; i < repeats; i++) {
+		if (count <= 0) {
+			return;
+		}
+		for (let i = 0; i < count; i++) {
 			super.handleInput(seq);
 		}
 	}
