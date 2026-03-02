@@ -221,15 +221,16 @@ class ModalEditor extends CustomEditor {
 	}
 
 	private handleNormalInput(data: string): void {
+		const printable = this.getPrintableInputChar(data);
 		if (matchesKey(data, "u")) {
 			this.undo();
 			return;
 		}
-		if (matchesKey(data, "shift+u")) {
+		if (matchesKey(data, "shift+u") || printable === "U") {
 			this.redo();
 			return;
 		}
-		if (matchesKey(data, "y") || matchesKey(data, "shift+y")) {
+		if (matchesKey(data, "y") || matchesKey(data, "shift+y") || printable === "Y") {
 			this.copyCurrentLine();
 			this.resetPending();
 			return;
@@ -238,7 +239,7 @@ class ModalEditor extends CustomEditor {
 			this.pasteAtCursor();
 			return;
 		}
-		if (matchesKey(data, "shift+e") && !this.pendingG) {
+		if ((matchesKey(data, "shift+e") || printable === "E") && !this.pendingG) {
 			this.send(SEQ.wordForward, this.consumeCount());
 			return;
 		}
@@ -374,11 +375,12 @@ class ModalEditor extends CustomEditor {
 	}
 
 	private handleVisualInput(data: string): void {
+		const printable = this.getPrintableInputChar(data);
 		if (matchesKey(data, "u")) {
 			this.undo();
 			return;
 		}
-		if (matchesKey(data, "shift+u")) {
+		if (matchesKey(data, "shift+u") || printable === "U") {
 			this.redo();
 			return;
 		}
@@ -386,7 +388,7 @@ class ModalEditor extends CustomEditor {
 			this.copyVisualSelection(this.mode === "visual_line");
 			return;
 		}
-		if (matchesKey(data, "shift+y")) {
+		if (matchesKey(data, "shift+y") || printable === "Y") {
 			this.copyVisualSelection(true);
 			return;
 		}
@@ -394,7 +396,7 @@ class ModalEditor extends CustomEditor {
 			this.pasteOverVisualSelection();
 			return;
 		}
-		if (matchesKey(data, "shift+e") && !this.pendingG) {
+		if ((matchesKey(data, "shift+e") || printable === "E") && !this.pendingG) {
 			this.send(SEQ.wordForward, this.consumeCount());
 			return;
 		}
@@ -518,7 +520,8 @@ class ModalEditor extends CustomEditor {
 	}
 
 	private handleDeleteOperator(data: string): void {
-		if ((matchesKey(data, "shift+e") || matchesKey(data, "shift+w")) && !this.pendingG) {
+		const printable = this.getPrintableInputChar(data);
+		if ((matchesKey(data, "shift+e") || matchesKey(data, "shift+w") || printable === "E" || printable === "W") && !this.pendingG) {
 			const motionCount = this.consumeCount();
 			const total = Math.max(1, this.pendingOperatorCount * motionCount);
 			this.withTrackedEdit(() => {

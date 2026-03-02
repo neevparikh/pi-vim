@@ -279,6 +279,20 @@ describe("modal-editor extension motions", () => {
 		assert.equal(editor.getText(), "c");
 	});
 
+	it("supports uppercase CSI-u variants for U/Y/E commands", () => {
+		editor.setText("abcdef");
+		press(editor, "\x1b", "0", "x", "u", "\x1b[85;2u");
+		assert.equal(editor.getText(), "bcdef");
+
+		editor.setText("a\nb");
+		press(editor, "\x1b", "9", "k", "0", "\x1b[89;2u", "p");
+		assert.equal(editor.getText(), "a\na\nb");
+
+		editor.setText("alpha beta gamma");
+		press(editor, "\x1b", "9", "k", "0", "\x1b[69;2u");
+		assert.equal(editor.getCursor().col, 5);
+	});
+
 	it("supports uppercase normal-mode commands from Kitty shift sequences", () => {
 		editor.setText("foo/bar baz");
 		press(editor, "\x1b", "0", "$", "\x1b[98;2u");
