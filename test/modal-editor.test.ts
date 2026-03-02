@@ -83,12 +83,15 @@ function press(editor: TestEditor, ...keys: string[]): void {
 describe("modal-editor extension motions", () => {
 	let editor: TestEditor;
 	let originalWrite: typeof process.stdout.write;
+	let clipboardOsc52Writes: string[];
 
 	beforeEach(() => {
+		clipboardOsc52Writes = [];
 		originalWrite = process.stdout.write.bind(process.stdout);
 		process.stdout.write = ((chunk: string | Uint8Array, encoding?: BufferEncoding, cb?: (error?: Error | null) => void) => {
 			const text = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString(encoding);
 			if (text.startsWith("\u001b]52;")) {
+				clipboardOsc52Writes.push(text);
 				if (cb) cb(null);
 				return true;
 			}
@@ -170,6 +173,124 @@ describe("modal-editor extension motions", () => {
 		assert.equal(editor.getCursor().col, 5);
 	});
 
+	it("supports missing word motions W, ge, and gE", () => {
+		editor.setText("foo/bar baz qux");
+		press(editor, "\x1b", "0", "W");
+		assert.equal(editor.getCursor().col, 8);
+
+		press(editor, "W");
+		assert.equal(editor.getCursor().col, 12);
+
+		press(editor, "g", "e");
+		assert.equal(editor.getCursor().col, 10);
+
+		press(editor, "g", "E");
+		assert.equal(editor.getCursor().col, 6);
+
+		editor.setText("foo/bar baz qux");
+		press(editor, "0", "2", "W");
+		assert.equal(editor.getCursor().col, 12);
+	});
+
+	it("supports find follow-ups with ; and , in normal and operator-pending modes", () => {
+		editor.setText("abXcdXefXgh");
+		press(editor, "\x1b", "0", "f", "X", ";", ";");
+		assert.equal(editor.getCursor().col, 8);
+
+		press(editor, ",", ",");
+		assert.equal(editor.getCursor().col, 2);
+
+		editor.setText("abXcdXefXgh");
+		press(editor, "0", "f", "X", ";", "d", ";");
+		assert.equal(editor.getText(), "abXcdgh");
+	});
+
+	it("supports structural motions %, (, ), {, }", () => {
+		editor.setText("(abc(def)ghi)");
+		press(editor, "\x1b", "0", "%");
+		assert.equal(editor.getCursor().col, 12);
+		press(editor, "%");
+		assert.equal(editor.getCursor().col, 0);
+
+		editor.setText("One. Two! Three?");
+		press(editor, "0", ")");
+		assert.equal(editor.getCursor().col, 5);
+		press(editor, ")");
+		assert.equal(editor.getCursor().col, 10);
+		press(editor, "(");
+		assert.equal(editor.getCursor().col, 5);
+
+		editor.setText("one\ntwo\n\nthree\nfour\n\nfive");
+		press(editor, "9", "k", "0", "}");
+		assert.deepEqual(editor.getCursor(), { line: 3, col: 0 });
+		press(editor, "}");
+		assert.deepEqual(editor.getCursor(), { line: 6, col: 0 });
+
+		editor.setText("one\ntwo\n\nthree\nfour\n\nfive");
+		press(editor, "9", "k", "0", "}", "j", "{");
+		assert.deepEqual(editor.getCursor(), { line: 3, col: 0 });
+	});
+
+	it("supports new motions in visual mode", () => {
+		editor.setText("foo/bar baz");
+		press(editor, "\x1b", "0", "v", "W");
+		assert.equal(editor.getCursor().col, 8);
+
+		press(editor, "\x1b");
+		editor.setText("abXcdXefXgh");
+		press(editor, "0", "v", "f", "X", ";");
+		assert.equal(editor.getCursor().col, 5);
+	});
+
+	it("supports backward find when Shift+F is sent as a Kitty sequence", () => {
+		editor.setText("alpha beta gamma");
+		press(editor, "\x1b", "0", "$", "\x1b[102;2u", "b");
+		assert.equal(editor.getCursor().col, 6);
+	});
+
+	it("supports Shift+T and shifted find targets from Kitty sequences", () => {
+		editor.setText("abXcdXef");
+		press(editor, "\x1b", "0", "$", "\x1b[116;2u", "\x1b[120;2u");
+		assert.equal(editor.getCursor().col, 6);
+	});
+
+	it("supports uppercase normal-mode commands from Kitty shift sequences", () => {
+		editor.setText("foo/bar baz");
+		press(editor, "\x1b", "0", "$", "\x1b[98;2u");
+		assert.equal(editor.getCursor().col, 8);
+
+		editor.setText("abcdef");
+		press(editor, "0", "3", "l", "\x1b[100;2u");
+		assert.equal(editor.getText(), "abc");
+
+		editor.setText("  abc");
+		press(editor, "0", "\x1b[105;2u", "X", "\x1b");
+		assert.equal(editor.getText(), "  Xabc");
+
+		editor.setText("abc");
+		press(editor, "0", "\x1b[97;2u", "X", "\x1b");
+		assert.equal(editor.getText(), "abcX");
+
+		editor.setText("a\nb");
+		press(editor, "0", "\x1b[111;2u", "X", "\x1b");
+		assert.equal(editor.getText(), "a\nX\nb");
+
+		editor.setText("hello\nworld");
+		press(editor, "\x1b", "k", "\x1b[106;2u");
+		assert.equal(editor.getText(), "hello world");
+	});
+
+	it("supports Shift+B from Kitty sequences in visual and delete-operator motions", () => {
+		editor.setText("foo/bar baz");
+		press(editor, "\x1b", "0", "v", "$", "\x1b[98;2u");
+		assert.equal(editor.getCursor().col, 8);
+
+		press(editor, "\x1b");
+		editor.setText("foo/bar baz");
+		press(editor, "0", "$", "d", "\x1b[98;2u");
+		assert.equal(editor.getText(), "foo/bar ");
+	});
+
 	it("supports B across line boundaries", () => {
 		editor.setText("one two\nthree four");
 		press(editor, "\x1b", "0", "B");
@@ -203,6 +324,17 @@ describe("modal-editor extension motions", () => {
 		assert.equal(editor.getCursor().col, 8);
 	});
 
+	it("emits OSC52 clipboard data when yanking in visual mode", () => {
+		editor.setText("abcdef");
+		press(editor, "\x1b", "0", "v", "2", "l", "y");
+
+		assert.ok(clipboardOsc52Writes.length > 0);
+		const lastWrite = clipboardOsc52Writes[clipboardOsc52Writes.length - 1] ?? "";
+		const match = lastWrite.match(/^\u001b\]52;[^;]*;([A-Za-z0-9+/=]+)\u0007$/);
+		assert.ok(match);
+		assert.equal(Buffer.from(match[1] ?? "", "base64").toString("utf8"), "abc");
+	});
+
 	it("copies visual selection with y and pastes with p", () => {
 		editor.setText("abcdef");
 		press(editor, "\x1b", "0", "v", "2", "l", "y", "$", "p");
@@ -214,6 +346,33 @@ describe("modal-editor extension motions", () => {
 		press(editor, "\x1b", "0", "v", "2", "l", "y");
 		press(editor, "0", "v", "1", "l", "p");
 		assert.equal(editor.getText(), "abccdef");
+	});
+
+	it("supports visual line mode with V and linewise delete", () => {
+		editor.setText("a\nb\nc\nd");
+		press(editor, "\x1b", "2", "k", "0", "V", "j", "d");
+		assert.equal(editor.getText(), "a\nd");
+
+		editor.setText("ab\ncd");
+		press(editor, "k", "0", "V", "v", "d");
+		assert.equal(editor.getText(), "b\ncd");
+	});
+
+	it("supports visual line yank and paste-over replacement", () => {
+		editor.setText("a\nb\nc\nd");
+		press(editor, "\x1b", "2", "k", "0", "V", "j", "y");
+		press(editor, "9", "k", "0", "V", "p");
+		assert.equal(editor.getText(), "b\nc\nb\nc\nd");
+	});
+
+	it("uses linewise paste semantics for normal-mode p after line yanks", () => {
+		editor.setText("a\nb\nc");
+		press(editor, "\x1b", "2", "k", "0", "y", "p");
+		assert.equal(editor.getText(), "a\na\nb\nc");
+
+		editor.setText("a\nb\nc\nd");
+		press(editor, "2", "k", "0", "V", "j", "y", "9", "k", "0", "p");
+		assert.equal(editor.getText(), "a\nb\nc\nb\nc\nd");
 	});
 
 	it("emits a cursor marker in visual mode so resize redraws keep cursor row in sync", () => {

@@ -2,9 +2,9 @@
  * Modal Editor - vim-like modal editing extension
  *
  * - Escape: insert -> normal mode (in normal mode, aborts agent when no pending command)
- * - Modes: normal, insert, visual
+ * - Modes: normal, insert, visual, visual-line
  * - Counts: e.g. 2l, 3w, 2dd
- * - Motions: h j k l, 0, $, w, b/B, e/E, f/F<char>, t/T<char>
+ * - Motions: h j k l, 0, $, w/W, b/B, e/E, ge/gE, f/F<char>, t/T<char>, ;/,, %,(,),{,}
  * - Editing: x, d + motion, dd, D, i, I, a, A, o, O, J
  * - Undo/redo: u / U
  * - Clipboard: y/Y copy, p paste (works in visual mode too)
@@ -12,7 +12,7 @@
 
 import { execSync } from "node:child_process";
 import { copyToClipboard, CustomEditor, type ExtensionAPI, type Theme } from "@mariozechner/pi-coding-agent";
-import { CURSOR_MARKER, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { CURSOR_MARKER, matchesKey, parseKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 const SEQ = {
 	left: "\x1b[D",
@@ -30,13 +30,20 @@ const SEQ = {
 	newLine: "\n",
 } as const;
 
-type Mode = "normal" | "insert" | "visual";
+type Mode = "normal" | "insert" | "visual" | "visual_line";
 type PendingOperator = "d" | null;
 type PendingFind = "f" | "F" | "t" | "T" | null;
+type FindType = Exclude<PendingFind, null>;
+type RegisterType = "charwise" | "linewise";
 
 interface Pos {
 	line: number;
 	col: number;
+}
+
+interface LastFindCommand {
+	type: FindType;
+	targetChar: string;
 }
 
 interface Snapshot {
@@ -65,6 +72,16 @@ let activeTheme: Theme | undefined;
 
 function isWhitespaceChar(grapheme: string): boolean {
 	return /^\s$/u.test(grapheme);
+}
+
+function getSmallWordClass(char: string): 0 | 1 | 2 {
+	if (isWhitespaceChar(char)) {
+		return 0;
+	}
+	if (/[A-Za-z0-9_]/.test(char)) {
+		return 1;
+	}
+	return 2;
 }
 
 function wordWrapLine(line: string, maxWidth: number): TextChunk[] {
@@ -123,9 +140,12 @@ class ModalEditor extends CustomEditor {
 	private pendingOperator: PendingOperator = null;
 	private pendingOperatorCount = 1;
 	private pendingFind: PendingFind = null;
+	private pendingG = false;
+	private lastFindCommand: LastFindCommand | null = null;
 	private visualAnchor: Pos | null = null;
 	private visualScrollOffset = 0;
 	private clipboardFallback = "";
+	private clipboardFallbackType: RegisterType = "charwise";
 	private undoHistory: Snapshot[] = [];
 	private redoHistory: Snapshot[] = [];
 	private trackingDepth = 0;
@@ -139,7 +159,7 @@ class ModalEditor extends CustomEditor {
 				return;
 			}
 
-			if (this.mode === "visual") {
+			if (this.mode === "visual" || this.mode === "visual_line") {
 				this.mode = "normal";
 				this.visualAnchor = null;
 				this.resetPending();
@@ -163,8 +183,9 @@ class ModalEditor extends CustomEditor {
 		}
 
 		if (this.pendingFind) {
-			if (data.length === 1 && data.charCodeAt(0) >= 32) {
-				this.applyFind(data);
+			const targetChar = this.getPrintableInputChar(data);
+			if (targetChar !== null) {
+				this.applyFind(targetChar);
 			} else {
 				this.resetPending();
 			}
@@ -177,7 +198,7 @@ class ModalEditor extends CustomEditor {
 		}
 
 		if (data.length === 1 && data >= "0" && data <= "9") {
-			if (data === "0" && this.pendingCount.length === 0 && !this.pendingOperator) {
+			if (data === "0" && this.pendingCount.length === 0 && !this.pendingOperator && !this.pendingG) {
 				this.send(SEQ.lineStart);
 				this.resetPending();
 				return;
@@ -191,7 +212,7 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 
-		if (this.mode === "visual") {
+		if (this.mode === "visual" || this.mode === "visual_line") {
 			this.handleVisualInput(data);
 			return;
 		}
@@ -217,12 +238,29 @@ class ModalEditor extends CustomEditor {
 			this.pasteAtCursor();
 			return;
 		}
-		if (matchesKey(data, "shift+e")) {
+		if (matchesKey(data, "shift+e") && !this.pendingG) {
 			this.send(SEQ.wordForward, this.consumeCount());
 			return;
 		}
+		if (data === "{" || matchesKey(data, "{") || matchesKey(data, "shift+[")) {
+			this.moveParagraphBackward(this.consumeCount());
+			return;
+		}
+		if (data === "}" || matchesKey(data, "}") || matchesKey(data, "shift+]")) {
+			this.moveParagraphForward(this.consumeCount());
+			return;
+		}
+		if (this.tryStartFindFromInput(data)) {
+			return;
+		}
 
-		switch (data) {
+		const command = this.normalizeCommandInput(data);
+		if (this.pendingG) {
+			this.handlePendingGMotion(command);
+			return;
+		}
+
+		switch (command) {
 			case "h":
 				this.send(SEQ.left, this.consumeCount());
 				return;
@@ -242,6 +280,9 @@ class ModalEditor extends CustomEditor {
 			case "w":
 				this.send(SEQ.wordForward, this.consumeCount());
 				return;
+			case "W":
+				this.moveBigWordForward(this.consumeCount());
+				return;
 			case "b":
 				this.send(SEQ.wordBackward, this.consumeCount());
 				return;
@@ -251,17 +292,29 @@ class ModalEditor extends CustomEditor {
 			case "e":
 				this.send(SEQ.wordForward, this.consumeCount());
 				return;
-			case "f":
-				this.pendingFind = "f";
+			case "%":
+				this.moveToMatchingPair();
 				return;
-			case "F":
-				this.pendingFind = "F";
+			case "(":
+				this.moveSentenceBackward(this.consumeCount());
 				return;
-			case "t":
-				this.pendingFind = "t";
+			case ")":
+				this.moveSentenceForward(this.consumeCount());
 				return;
-			case "T":
-				this.pendingFind = "T";
+			case "{":
+				this.moveParagraphBackward(this.consumeCount());
+				return;
+			case "}":
+				this.moveParagraphForward(this.consumeCount());
+				return;
+			case ";":
+				this.repeatLastFind(false);
+				return;
+			case ",":
+				this.repeatLastFind(true);
+				return;
+			case "g":
+				this.pendingG = true;
 				return;
 			case "x":
 				this.withTrackedEdit(() => {
@@ -277,6 +330,11 @@ class ModalEditor extends CustomEditor {
 				return;
 			case "v":
 				this.mode = "visual";
+				this.visualAnchor = this.getCursor();
+				this.resetPending();
+				return;
+			case "V":
+				this.mode = "visual_line";
 				this.visualAnchor = this.getCursor();
 				this.resetPending();
 				return;
@@ -305,7 +363,7 @@ class ModalEditor extends CustomEditor {
 				this.joinWithNextLine(this.consumeCount());
 				return;
 			default:
-				if (data.length === 1 && data.charCodeAt(0) >= 32) {
+				if (this.getPrintableInputChar(data) !== null) {
 					this.resetPending();
 					return;
 				}
@@ -325,7 +383,7 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 		if (matchesKey(data, "y")) {
-			this.copyVisualSelection(false);
+			this.copyVisualSelection(this.mode === "visual_line");
 			return;
 		}
 		if (matchesKey(data, "shift+y")) {
@@ -336,15 +394,49 @@ class ModalEditor extends CustomEditor {
 			this.pasteOverVisualSelection();
 			return;
 		}
-		if (matchesKey(data, "shift+e")) {
+		if (matchesKey(data, "shift+e") && !this.pendingG) {
 			this.send(SEQ.wordForward, this.consumeCount());
 			return;
 		}
+		if (data === "{" || matchesKey(data, "{") || matchesKey(data, "shift+[")) {
+			this.moveParagraphBackward(this.consumeCount());
+			return;
+		}
+		if (data === "}" || matchesKey(data, "}") || matchesKey(data, "shift+]")) {
+			this.moveParagraphForward(this.consumeCount());
+			return;
+		}
+		if (this.tryStartFindFromInput(data)) {
+			return;
+		}
 
-		switch (data) {
+		const command = this.normalizeCommandInput(data);
+		if (this.pendingG) {
+			this.handlePendingGMotion(command);
+			return;
+		}
+
+		switch (command) {
 			case "v":
+				if (this.mode === "visual_line") {
+					this.mode = "visual";
+					this.resetPending();
+					return;
+				}
 				this.mode = "normal";
 				this.visualAnchor = null;
+				this.resetPending();
+				return;
+			case "V":
+				if (this.mode === "visual_line") {
+					this.mode = "normal";
+					this.visualAnchor = null;
+				} else {
+					this.mode = "visual_line";
+					if (!this.visualAnchor) {
+						this.visualAnchor = this.getCursor();
+					}
+				}
 				this.resetPending();
 				return;
 			case "d":
@@ -378,6 +470,9 @@ class ModalEditor extends CustomEditor {
 			case "w":
 				this.send(SEQ.wordForward, this.consumeCount());
 				return;
+			case "W":
+				this.moveBigWordForward(this.consumeCount());
+				return;
 			case "b":
 				this.send(SEQ.wordBackward, this.consumeCount());
 				return;
@@ -387,20 +482,32 @@ class ModalEditor extends CustomEditor {
 			case "e":
 				this.send(SEQ.wordForward, this.consumeCount());
 				return;
-			case "f":
-				this.pendingFind = "f";
+			case "%":
+				this.moveToMatchingPair();
 				return;
-			case "F":
-				this.pendingFind = "F";
+			case "(":
+				this.moveSentenceBackward(this.consumeCount());
 				return;
-			case "t":
-				this.pendingFind = "t";
+			case ")":
+				this.moveSentenceForward(this.consumeCount());
 				return;
-			case "T":
-				this.pendingFind = "T";
+			case "{":
+				this.moveParagraphBackward(this.consumeCount());
+				return;
+			case "}":
+				this.moveParagraphForward(this.consumeCount());
+				return;
+			case ";":
+				this.repeatLastFind(false);
+				return;
+			case ",":
+				this.repeatLastFind(true);
+				return;
+			case "g":
+				this.pendingG = true;
 				return;
 			default:
-				if (data.length === 1 && data.charCodeAt(0) >= 32) {
+				if (this.getPrintableInputChar(data) !== null) {
 					this.resetPending();
 					return;
 				}
@@ -411,7 +518,7 @@ class ModalEditor extends CustomEditor {
 	}
 
 	private handleDeleteOperator(data: string): void {
-		if (matchesKey(data, "shift+e")) {
+		if ((matchesKey(data, "shift+e") || matchesKey(data, "shift+w")) && !this.pendingG) {
 			const motionCount = this.consumeCount();
 			const total = Math.max(1, this.pendingOperatorCount * motionCount);
 			this.withTrackedEdit(() => {
@@ -420,8 +527,17 @@ class ModalEditor extends CustomEditor {
 			this.resetPending();
 			return;
 		}
+		if (this.tryStartFindFromInput(data)) {
+			return;
+		}
 
-		switch (data) {
+		const command = this.normalizeCommandInput(data);
+		if (this.pendingG) {
+			this.handlePendingGDeleteMotion(command);
+			return;
+		}
+
+		switch (command) {
 			case "d": {
 				const motionCount = this.consumeCount();
 				const totalLines = Math.max(1, this.pendingOperatorCount * motionCount);
@@ -429,7 +545,8 @@ class ModalEditor extends CustomEditor {
 				return;
 			}
 			case "w":
-			case "e": {
+			case "e":
+			case "W": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
 				this.withTrackedEdit(() => {
@@ -453,6 +570,18 @@ class ModalEditor extends CustomEditor {
 				this.deleteBigWordBackward(total);
 				return;
 			}
+			case ";":
+				this.repeatLastFind(false);
+				return;
+			case ",":
+				this.repeatLastFind(true);
+				return;
+			case "g":
+				this.pendingG = true;
+				return;
+			case "%":
+				this.deleteToMatchingPair();
+				return;
 			case "l": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
@@ -492,17 +621,19 @@ class ModalEditor extends CustomEditor {
 				this.deleteLinesUp(total);
 				return;
 			}
-			case "f":
-				this.pendingFind = "f";
+			default:
+				this.resetPending();
 				return;
-			case "F":
-				this.pendingFind = "F";
+		}
+	}
+
+	private handlePendingGMotion(command: string): void {
+		switch (command) {
+			case "e":
+				this.moveWordEndBackward(this.consumeCount(), false);
 				return;
-			case "t":
-				this.pendingFind = "t";
-				return;
-			case "T":
-				this.pendingFind = "T";
+			case "E":
+				this.moveWordEndBackward(this.consumeCount(), true);
 				return;
 			default:
 				this.resetPending();
@@ -510,8 +641,109 @@ class ModalEditor extends CustomEditor {
 		}
 	}
 
-	private applyFind(targetChar: string): void {
-		const findType = this.pendingFind;
+	private handlePendingGDeleteMotion(command: string): void {
+		switch (command) {
+			case "e": {
+				const motionCount = this.consumeCount();
+				const total = Math.max(1, this.pendingOperatorCount * motionCount);
+				this.deleteToWordEndBackward(total, false);
+				return;
+			}
+			case "E": {
+				const motionCount = this.consumeCount();
+				const total = Math.max(1, this.pendingOperatorCount * motionCount);
+				this.deleteToWordEndBackward(total, true);
+				return;
+			}
+			default:
+				this.resetPending();
+				return;
+		}
+	}
+
+	private normalizeCommandInput(data: string): string {
+		if (matchesKey(data, "h")) return "h";
+		if (matchesKey(data, "j")) return "j";
+		if (matchesKey(data, "k")) return "k";
+		if (matchesKey(data, "l")) return "l";
+		if (matchesKey(data, "w")) return "w";
+		if (matchesKey(data, "b")) return "b";
+		if (matchesKey(data, "e")) return "e";
+		if (matchesKey(data, "x")) return "x";
+		if (matchesKey(data, "d")) return "d";
+		if (matchesKey(data, "v")) return "v";
+		if (matchesKey(data, "shift+v")) return "V";
+		if (matchesKey(data, "i")) return "i";
+		if (matchesKey(data, "a")) return "a";
+		if (matchesKey(data, "o")) return "o";
+		if (matchesKey(data, "g")) return "g";
+		if (matchesKey(data, "$")) return "$";
+		if (matchesKey(data, ";")) return ";";
+		if (matchesKey(data, ",")) return ",";
+		if (matchesKey(data, "%")) return "%";
+		if (matchesKey(data, "(")) return "(";
+		if (matchesKey(data, ")")) return ")";
+		if (matchesKey(data, "{")) return "{";
+		if (matchesKey(data, "}")) return "}";
+		if (matchesKey(data, "shift+[")) return "{";
+		if (matchesKey(data, "shift+]")) return "}";
+
+		if (matchesKey(data, "shift+b")) return "B";
+		if (matchesKey(data, "shift+d")) return "D";
+		if (matchesKey(data, "shift+i")) return "I";
+		if (matchesKey(data, "shift+a")) return "A";
+		if (matchesKey(data, "shift+o")) return "O";
+		if (matchesKey(data, "shift+j")) return "J";
+		if (matchesKey(data, "shift+e")) return "E";
+		if (matchesKey(data, "shift+w")) return "W";
+
+		return data;
+	}
+
+	private getPrintableInputChar(data: string): string | null {
+		if (data.length === 1 && data.charCodeAt(0) >= 32) {
+			return data;
+		}
+
+		const parsed = parseKey(data);
+		if (!parsed) {
+			return null;
+		}
+
+		if (parsed.length === 1 && parsed.charCodeAt(0) >= 32) {
+			return parsed;
+		}
+
+		const shiftedLetter = parsed.match(/^shift\+([a-z])$/);
+		if (shiftedLetter) {
+			return shiftedLetter[1]!.toUpperCase();
+		}
+
+		return null;
+	}
+
+	private tryStartFindFromInput(data: string): boolean {
+		if (matchesKey(data, "f")) {
+			this.pendingFind = "f";
+			return true;
+		}
+		if (matchesKey(data, "shift+f")) {
+			this.pendingFind = "F";
+			return true;
+		}
+		if (matchesKey(data, "t")) {
+			this.pendingFind = "t";
+			return true;
+		}
+		if (matchesKey(data, "shift+t")) {
+			this.pendingFind = "T";
+			return true;
+		}
+		return false;
+	}
+
+	private applyFind(targetChar: string, findOverride: FindType | null = null, rememberAsLast: boolean = true): void {
+		const findType = findOverride ?? this.pendingFind;
 		const operator = this.pendingOperator;
 		const occurrenceCount = this.consumeCount();
 		const { line, col } = this.getCursor();
@@ -540,6 +772,10 @@ class ModalEditor extends CustomEditor {
 				return;
 			}
 			from = isBackward ? foundIndex - 1 : foundIndex + 1;
+		}
+
+		if (rememberAsLast) {
+			this.lastFindCommand = { type: findType, targetChar };
 		}
 
 		if (operator === "d") {
@@ -571,6 +807,332 @@ class ModalEditor extends CustomEditor {
 		const steps = Math.max(0, targetCol - col);
 		this.send(SEQ.right, steps);
 		this.resetPending();
+	}
+
+	private getOppositeFindType(type: FindType): FindType {
+		if (type === "f") return "F";
+		if (type === "F") return "f";
+		if (type === "t") return "T";
+		return "t";
+	}
+
+	private repeatLastFind(reverse: boolean): void {
+		if (!this.lastFindCommand) {
+			this.resetPending();
+			return;
+		}
+		const findType = reverse ? this.getOppositeFindType(this.lastFindCommand.type) : this.lastFindCommand.type;
+		this.applyFind(this.lastFindCommand.targetChar, findType, false);
+	}
+
+	private moveBigWordForward(count: number): void {
+		const repeats = Math.max(1, count);
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+		const fullText = lines.join("\n");
+		const fromIndex = this.posToIndex(lines, cursor);
+		const targetIndex = this.findBigWordStartForward(fullText, fromIndex, repeats);
+		this.moveCursorTo(this.indexToPos(fullText, targetIndex));
+		this.resetPending();
+	}
+
+	private moveBigWordBackward(count: number): void {
+		const repeats = Math.max(1, count);
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+		const fullText = lines.join("\n");
+		const fromIndex = this.posToIndex(lines, cursor);
+		const targetIndex = this.findBigWordStartBackward(fullText, fromIndex, repeats);
+		this.moveCursorTo(this.indexToPos(fullText, targetIndex));
+		this.resetPending();
+	}
+
+	private moveWordEndBackward(count: number, bigWord: boolean): void {
+		const repeats = Math.max(1, count);
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+		const fullText = lines.join("\n");
+		const fromIndex = this.posToIndex(lines, cursor);
+		const targetIndex = this.findWordEndBackward(fullText, fromIndex, repeats, bigWord);
+		this.moveCursorTo(this.indexToPos(fullText, targetIndex));
+		this.resetPending();
+	}
+
+	private deleteToWordEndBackward(count: number, bigWord: boolean): void {
+		const repeats = Math.max(1, count);
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+		const fullText = lines.join("\n");
+		const cursorIndex = this.posToIndex(lines, cursor);
+		const targetIndex = this.findWordEndBackward(fullText, cursorIndex, repeats, bigWord);
+		const deleteStart = Math.max(0, targetIndex);
+		const deleteEnd = Math.min(fullText.length, cursorIndex + (cursorIndex < fullText.length ? 1 : 0));
+
+		if (deleteStart >= deleteEnd) {
+			this.resetPending();
+			return;
+		}
+
+		this.withTrackedEdit(() => {
+			const nextText = fullText.slice(0, deleteStart) + fullText.slice(deleteEnd);
+			this.setTextAndMoveCursor(nextText, this.indexToPos(nextText, deleteStart));
+		});
+		this.resetPending();
+	}
+
+	private moveSentenceForward(count: number): void {
+		const repeats = Math.max(1, count);
+		const lines = this.getLines();
+		const fullText = lines.join("\n");
+		const starts = this.getSentenceStarts(fullText);
+		let index = this.posToIndex(lines, this.getCursor());
+
+		for (let step = 0; step < repeats; step++) {
+			const nextStart = starts.find((start) => start > index);
+			if (nextStart === undefined) {
+				index = fullText.length;
+				break;
+			}
+			index = nextStart;
+		}
+
+		this.moveCursorTo(this.indexToPos(fullText, index));
+		this.resetPending();
+	}
+
+	private moveSentenceBackward(count: number): void {
+		const repeats = Math.max(1, count);
+		const lines = this.getLines();
+		const fullText = lines.join("\n");
+		const starts = this.getSentenceStarts(fullText);
+		let index = this.posToIndex(lines, this.getCursor());
+
+		for (let step = 0; step < repeats; step++) {
+			let previousStart = 0;
+			for (const start of starts) {
+				if (start < index) {
+					previousStart = start;
+				} else {
+					break;
+				}
+			}
+			index = previousStart;
+		}
+
+		this.moveCursorTo(this.indexToPos(fullText, index));
+		this.resetPending();
+	}
+
+	private moveParagraphForward(count: number): void {
+		const repeats = Math.max(1, count);
+		const lines = this.getLines();
+		let targetLine = this.getCursor().line;
+
+		for (let step = 0; step < repeats; step++) {
+			let probe = targetLine + 1;
+			while (probe < lines.length && !this.isBlankLine(lines[probe] ?? "")) {
+				probe += 1;
+			}
+			while (probe < lines.length && this.isBlankLine(lines[probe] ?? "")) {
+				probe += 1;
+			}
+			if (probe >= lines.length) {
+				targetLine = Math.max(0, lines.length - 1);
+				break;
+			}
+			targetLine = probe;
+		}
+
+		this.moveCursorTo({ line: targetLine, col: 0 });
+		this.resetPending();
+	}
+
+	private moveParagraphBackward(count: number): void {
+		const repeats = Math.max(1, count);
+		const lines = this.getLines();
+		let targetLine = this.getCursor().line;
+
+		for (let step = 0; step < repeats; step++) {
+			let probe = targetLine - 1;
+			while (probe >= 0 && this.isBlankLine(lines[probe] ?? "")) {
+				probe -= 1;
+			}
+			if (probe < 0) {
+				targetLine = 0;
+				break;
+			}
+			while (probe >= 0 && !this.isBlankLine(lines[probe] ?? "")) {
+				probe -= 1;
+			}
+			targetLine = Math.max(0, probe + 1);
+		}
+
+		this.moveCursorTo({ line: targetLine, col: 0 });
+		this.resetPending();
+	}
+
+	private moveToMatchingPair(count: number = this.consumeCount()): void {
+		const repeats = Math.max(1, count);
+		for (let step = 0; step < repeats; step++) {
+			const lines = this.getLines();
+			const fullText = lines.join("\n");
+			const cursorIndex = this.posToIndex(lines, this.getCursor());
+			const targetIndex = this.findMatchingPairIndex(fullText, cursorIndex);
+			if (targetIndex === null) {
+				this.resetPending();
+				return;
+			}
+			this.moveCursorTo(this.indexToPos(fullText, targetIndex));
+		}
+		this.resetPending();
+	}
+
+	private deleteToMatchingPair(count?: number): void {
+		const repeats = Math.max(1, count ?? Math.max(1, this.pendingOperatorCount * this.consumeCount()));
+		this.withTrackedEdit(() => {
+			for (let step = 0; step < repeats; step++) {
+				const lines = this.getLines();
+				const fullText = lines.join("\n");
+				const cursor = this.getCursor();
+				const cursorIndex = this.posToIndex(lines, cursor);
+				const targetIndex = this.findMatchingPairIndex(fullText, cursorIndex);
+				if (targetIndex === null) {
+					break;
+				}
+				const start = Math.min(cursorIndex, targetIndex);
+				const end = Math.min(fullText.length, Math.max(cursorIndex, targetIndex) + 1);
+				if (start >= end) {
+					break;
+				}
+				const nextText = fullText.slice(0, start) + fullText.slice(end);
+				this.setTextAndMoveCursor(nextText, this.indexToPos(nextText, start));
+			}
+		});
+		this.resetPending();
+	}
+
+	private findBigWordStartForward(text: string, fromIndex: number, repeats: number): number {
+		let index = Math.max(0, Math.min(fromIndex, text.length));
+		const steps = Math.max(1, repeats);
+
+		for (let step = 0; step < steps; step++) {
+			if (index >= text.length) {
+				return text.length;
+			}
+
+			let probe = index;
+			if (!isWhitespaceChar(text[probe] ?? "")) {
+				while (probe < text.length && !isWhitespaceChar(text[probe] ?? "")) {
+					probe += 1;
+				}
+			}
+			while (probe < text.length && isWhitespaceChar(text[probe] ?? "")) {
+				probe += 1;
+			}
+			index = probe;
+		}
+
+		return index;
+	}
+
+	private findWordEndBackward(text: string, fromIndex: number, repeats: number, bigWord: boolean): number {
+		if (text.length === 0) {
+			return 0;
+		}
+
+		let probe = Math.max(0, Math.min(fromIndex, text.length - 1));
+		const steps = Math.max(1, repeats);
+		let result = 0;
+
+		for (let step = 0; step < steps; step++) {
+			if (!isWhitespaceChar(text[probe] ?? "")) {
+				if (bigWord) {
+					while (probe >= 0 && !isWhitespaceChar(text[probe] ?? "")) {
+						probe -= 1;
+					}
+				} else {
+					const cls = getSmallWordClass(text[probe] ?? "");
+					while (probe >= 0 && getSmallWordClass(text[probe] ?? "") === cls) {
+						probe -= 1;
+					}
+				}
+			}
+
+			while (probe >= 0 && isWhitespaceChar(text[probe] ?? "")) {
+				probe -= 1;
+			}
+			if (probe < 0) {
+				return 0;
+			}
+
+			result = probe;
+		}
+
+		return result;
+	}
+
+	private getSentenceStarts(text: string): number[] {
+		const starts = [0];
+		const sentenceBoundary = /[.!?][)"'\]]*\s+/g;
+		let match: RegExpExecArray | null;
+		while ((match = sentenceBoundary.exec(text)) !== null) {
+			let start = match.index + match[0].length;
+			while (start < text.length && isWhitespaceChar(text[start] ?? "")) {
+				start += 1;
+			}
+			if (start < text.length && starts[starts.length - 1] !== start) {
+				starts.push(start);
+			}
+		}
+		return starts;
+	}
+
+	private findMatchingPairIndex(text: string, fromIndex: number): number | null {
+		if (text.length === 0) {
+			return null;
+		}
+
+		const openingToClosing: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+		const closingToOpening: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+		let index = Math.max(0, Math.min(fromIndex, text.length - 1));
+		let ch = text[index] ?? "";
+
+		if (!openingToClosing[ch] && !closingToOpening[ch] && index > 0) {
+			index -= 1;
+			ch = text[index] ?? "";
+		}
+
+		if (openingToClosing[ch]) {
+			const open = ch;
+			const close = openingToClosing[ch]!;
+			let depth = 0;
+			for (let i = index; i < text.length; i++) {
+				const c = text[i] ?? "";
+				if (c === open) depth += 1;
+				if (c === close) depth -= 1;
+				if (depth === 0) return i;
+			}
+			return null;
+		}
+
+		if (closingToOpening[ch]) {
+			const close = ch;
+			const open = closingToOpening[ch]!;
+			let depth = 0;
+			for (let i = index; i >= 0; i--) {
+				const c = text[i] ?? "";
+				if (c === close) depth += 1;
+				if (c === open) depth -= 1;
+				if (depth === 0) return i;
+			}
+			return null;
+		}
+
+		return null;
+	}
+
+	private isBlankLine(line: string): boolean {
+		return /^\s*$/.test(line);
 	}
 
 	private moveBigWordBackward(count: number): void {
@@ -795,10 +1357,36 @@ class ModalEditor extends CustomEditor {
 		this.resetPending();
 	}
 
+	private getVisualLineRange(): { startLine: number; endLine: number } | null {
+		if (!this.visualAnchor) {
+			return null;
+		}
+		const cursor = this.getCursor();
+		return {
+			startLine: Math.min(this.visualAnchor.line, cursor.line),
+			endLine: Math.max(this.visualAnchor.line, cursor.line),
+		};
+	}
+
 	private deleteVisualSelection(): void {
 		const anchor = this.visualAnchor;
 		if (!anchor) {
 			this.mode = "normal";
+			this.resetPending();
+			return;
+		}
+
+		if (this.mode === "visual_line") {
+			const range = this.getVisualLineRange();
+			if (!range) {
+				this.mode = "normal";
+				this.visualAnchor = null;
+				this.resetPending();
+				return;
+			}
+			this.deleteLinesAt(range.startLine, range.endLine - range.startLine + 1);
+			this.mode = "normal";
+			this.visualAnchor = null;
 			this.resetPending();
 			return;
 		}
@@ -829,7 +1417,7 @@ class ModalEditor extends CustomEditor {
 	private copyCurrentLine(): void {
 		const cursor = this.getCursor();
 		const lineText = this.getLines()[cursor.line] ?? "";
-		this.writeClipboard(lineText);
+		this.writeClipboard(lineText, "linewise");
 	}
 
 	private copyVisualSelection(linewise: boolean): void {
@@ -842,10 +1430,11 @@ class ModalEditor extends CustomEditor {
 
 		const lines = this.getLines();
 		const cursor = this.getCursor();
-		if (linewise) {
+		const useLinewise = linewise || this.mode === "visual_line";
+		if (useLinewise) {
 			const startLine = Math.min(anchor.line, cursor.line);
 			const endLine = Math.max(anchor.line, cursor.line);
-			this.writeClipboard(lines.slice(startLine, endLine + 1).join("\n"));
+			this.writeClipboard(lines.slice(startLine, endLine + 1).join("\n"), "linewise");
 		} else {
 			const fullText = lines.join("\n");
 			let startIndex = this.posToIndex(lines, anchor);
@@ -854,7 +1443,7 @@ class ModalEditor extends CustomEditor {
 				[startIndex, endIndex] = [endIndex, startIndex];
 			}
 			endIndex = Math.min(fullText.length, endIndex + 1);
-			this.writeClipboard(fullText.slice(startIndex, endIndex));
+			this.writeClipboard(fullText.slice(startIndex, endIndex), "charwise");
 		}
 
 		this.mode = "normal";
@@ -863,8 +1452,21 @@ class ModalEditor extends CustomEditor {
 	}
 
 	private pasteAtCursor(): void {
-		const clipboardText = this.readClipboardText() ?? this.clipboardFallback;
-		if (!clipboardText) {
+		const register = this.readClipboardRegister();
+		if (!register) {
+			this.resetPending();
+			return;
+		}
+
+		if (register.type === "linewise") {
+			this.withTrackedEdit(() => {
+				const cursor = this.getCursor();
+				const lines = this.getLines();
+				const pasteLines = this.splitClipboardLines(register.text);
+				const insertLine = Math.max(0, Math.min(cursor.line + 1, lines.length));
+				const nextLines = [...lines.slice(0, insertLine), ...pasteLines, ...lines.slice(insertLine)];
+				this.setTextAndMoveCursor(nextLines.join("\n"), { line: insertLine, col: 0 });
+			});
 			this.resetPending();
 			return;
 		}
@@ -879,8 +1481,8 @@ class ModalEditor extends CustomEditor {
 				insertIndex += 1;
 			}
 
-			const nextText = fullText.slice(0, insertIndex) + clipboardText + fullText.slice(insertIndex);
-			const cursorIndex = insertIndex + Math.max(0, clipboardText.length - 1);
+			const nextText = fullText.slice(0, insertIndex) + register.text + fullText.slice(insertIndex);
+			const cursorIndex = insertIndex + Math.max(0, register.text.length - 1);
 			this.setTextAndMoveCursor(nextText, this.indexToPos(nextText, cursorIndex));
 		});
 		this.resetPending();
@@ -888,8 +1490,35 @@ class ModalEditor extends CustomEditor {
 
 	private pasteOverVisualSelection(): void {
 		const anchor = this.visualAnchor;
-		const clipboardText = this.readClipboardText() ?? this.clipboardFallback;
-		if (!anchor || !clipboardText) {
+		const register = this.readClipboardRegister();
+		if (!anchor || !register) {
+			this.mode = "normal";
+			this.visualAnchor = null;
+			this.resetPending();
+			return;
+		}
+
+		if (this.mode === "visual_line") {
+			const range = this.getVisualLineRange();
+			if (!range) {
+				this.mode = "normal";
+				this.visualAnchor = null;
+				this.resetPending();
+				return;
+			}
+
+			this.withTrackedEdit(() => {
+				const lines = this.getLines();
+				const pasteLines = this.splitClipboardLines(register.text);
+				const nextLines = [
+					...lines.slice(0, range.startLine),
+					...pasteLines,
+					...lines.slice(range.endLine + 1),
+				];
+				const normalized = nextLines.length > 0 ? nextLines : [""];
+				this.setTextAndMoveCursor(normalized.join("\n"), { line: range.startLine, col: 0 });
+			});
+
 			this.mode = "normal";
 			this.visualAnchor = null;
 			this.resetPending();
@@ -908,8 +1537,8 @@ class ModalEditor extends CustomEditor {
 			}
 			endIndex = Math.min(fullText.length, endIndex + 1);
 
-			const nextText = fullText.slice(0, startIndex) + clipboardText + fullText.slice(endIndex);
-			const cursorIndex = startIndex + Math.max(0, clipboardText.length - 1);
+			const nextText = fullText.slice(0, startIndex) + register.text + fullText.slice(endIndex);
+			const cursorIndex = startIndex + Math.max(0, register.text.length - 1);
 			this.setTextAndMoveCursor(nextText, this.indexToPos(nextText, cursorIndex));
 		});
 
@@ -918,8 +1547,35 @@ class ModalEditor extends CustomEditor {
 		this.resetPending();
 	}
 
-	private writeClipboard(text: string): void {
+	private splitClipboardLines(text: string): string[] {
+		const normalized = text.replace(/\r\n/g, "\n");
+		const lines = normalized.split("\n");
+		if (lines.length > 1 && lines[lines.length - 1] === "") {
+			lines.pop();
+		}
+		return lines.length > 0 ? lines : [""];
+	}
+
+	private readClipboardRegister(): { text: string; type: RegisterType } | null {
+		const systemText = this.readClipboardText();
+		const text = systemText ?? this.clipboardFallback;
+		if (!text) {
+			return null;
+		}
+
+		let type: RegisterType = "charwise";
+		if (systemText === null || text === this.clipboardFallback) {
+			type = this.clipboardFallbackType;
+		}
+		if (type === "charwise" && text.endsWith("\n")) {
+			type = "linewise";
+		}
+		return { text, type };
+	}
+
+	private writeClipboard(text: string, type: RegisterType): void {
 		this.clipboardFallback = text;
+		this.clipboardFallbackType = type;
 		copyToClipboard(text);
 	}
 
@@ -1081,11 +1737,24 @@ class ModalEditor extends CustomEditor {
 	}
 
 	private getVisualSelectionRange(lines: string[]): { start: number; end: number } | null {
-		if (this.mode !== "visual" || !this.visualAnchor) {
+		if ((this.mode !== "visual" && this.mode !== "visual_line") || !this.visualAnchor) {
 			return null;
 		}
-		const cursor = this.getCursor();
+
 		const fullLen = lines.join("\n").length;
+		if (this.mode === "visual_line") {
+			const cursor = this.getCursor();
+			const startLine = Math.min(this.visualAnchor.line, cursor.line);
+			const endLine = Math.max(this.visualAnchor.line, cursor.line);
+			const start = this.posToIndex(lines, { line: startLine, col: 0 });
+			let end = this.posToIndex(lines, { line: endLine, col: (lines[endLine] ?? "").length });
+			if (endLine < lines.length - 1) {
+				end += 1;
+			}
+			return { start, end: Math.min(fullLen, end) };
+		}
+
+		const cursor = this.getCursor();
 		const a = this.posToIndex(lines, this.visualAnchor);
 		const c = this.posToIndex(lines, cursor);
 		const start = Math.min(a, c);
@@ -1267,7 +1936,7 @@ class ModalEditor extends CustomEditor {
 	}
 
 	private hasPendingCommand(): boolean {
-		return this.pendingCount.length > 0 || this.pendingOperator !== null || this.pendingFind !== null;
+		return this.pendingCount.length > 0 || this.pendingOperator !== null || this.pendingFind !== null || this.pendingG;
 	}
 
 	private consumeCount(defaultValue: number = 1): number {
@@ -1284,6 +1953,7 @@ class ModalEditor extends CustomEditor {
 		this.pendingOperator = null;
 		this.pendingOperatorCount = 1;
 		this.pendingFind = null;
+		this.pendingG = false;
 	}
 
 	private getModeBorderColor(base: (text: string) => string): (text: string) => string {
@@ -1294,7 +1964,7 @@ class ModalEditor extends CustomEditor {
 		if (this.mode === "normal") {
 			return (text: string) => themeRef.fg("accent", text);
 		}
-		if (this.mode === "visual") {
+		if (this.mode === "visual" || this.mode === "visual_line") {
 			return (text: string) => themeRef.fg("warning", text);
 		}
 		// Insert mode keeps the default app/editor border color behavior
@@ -1305,7 +1975,7 @@ class ModalEditor extends CustomEditor {
 		const previousBorderColor = this.borderColor;
 		const modeBorderColor = this.getModeBorderColor(previousBorderColor);
 		this.borderColor = modeBorderColor;
-		const lines = this.mode === "visual" ? this.renderVisualMode(width) : super.render(width);
+		const lines = this.mode === "visual" || this.mode === "visual_line" ? this.renderVisualMode(width) : super.render(width);
 		this.borderColor = previousBorderColor;
 		if (lines.length === 0) return lines;
 
@@ -1314,10 +1984,12 @@ class ModalEditor extends CustomEditor {
 			label = " NORMAL ";
 		} else if (this.mode === "visual") {
 			label = " VISUAL ";
+		} else if (this.mode === "visual_line") {
+			label = " VISUAL LINE ";
 		}
 
 		if (this.mode !== "insert") {
-			const pending = `${this.pendingOperator ?? ""}${this.pendingFind ?? ""}${this.pendingCount}`;
+			const pending = `${this.pendingOperator ?? ""}${this.pendingG ? "g" : ""}${this.pendingFind ?? ""}${this.pendingCount}`;
 			if (pending.length > 0) {
 				label = `${label.slice(0, -1)} [${pending}] `;
 			}
