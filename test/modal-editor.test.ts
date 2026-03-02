@@ -254,6 +254,21 @@ describe("modal-editor extension motions", () => {
 		assert.equal(editor.getCursor().col, 6);
 	});
 
+	it("supports Shift+F/Shift+T when Kitty sends uppercase codepoint CSI-u keys", () => {
+		editor.setText("abXcdXef");
+		press(editor, "\x1b", "0", "$", "\x1b[70;2u", "X");
+		assert.equal(editor.getCursor().col, 5);
+
+		press(editor, "\x1b", "0", "$", "\x1b[84;2u", "X");
+		assert.equal(editor.getCursor().col, 6);
+	});
+
+	it("supports uppercase CSI-u find targets in pending find mode", () => {
+		editor.setText("abXcdXef");
+		press(editor, "\x1b", "0", "$", "F", "\x1b[88;2u");
+		assert.equal(editor.getCursor().col, 5);
+	});
+
 	it("supports uppercase normal-mode commands from Kitty shift sequences", () => {
 		editor.setText("foo/bar baz");
 		press(editor, "\x1b", "0", "$", "\x1b[98;2u");

@@ -706,20 +706,35 @@ class ModalEditor extends CustomEditor {
 		}
 
 		const parsed = parseKey(data);
-		if (!parsed) {
+		if (parsed) {
+			if (parsed.length === 1 && parsed.charCodeAt(0) >= 32) {
+				return parsed;
+			}
+
+			const shiftedLetter = parsed.match(/^shift\+([a-z])$/);
+			if (shiftedLetter) {
+				return shiftedLetter[1]!.toUpperCase();
+			}
+		}
+
+		const kittyUnicodeMatch = data.match(/^\x1b\[(\d+)(?:;(\d+))?u$/);
+		if (!kittyUnicodeMatch) {
 			return null;
 		}
 
-		if (parsed.length === 1 && parsed.charCodeAt(0) >= 32) {
-			return parsed;
+		const codepoint = Number.parseInt(kittyUnicodeMatch[1]!, 10);
+		if (!Number.isFinite(codepoint) || codepoint < 32) {
+			return null;
 		}
 
-		const shiftedLetter = parsed.match(/^shift\+([a-z])$/);
-		if (shiftedLetter) {
-			return shiftedLetter[1]!.toUpperCase();
+		let ch = String.fromCodePoint(codepoint);
+		const modifier = kittyUnicodeMatch[2] ? Number.parseInt(kittyUnicodeMatch[2]!, 10) : 1;
+		const hasShift = Number.isFinite(modifier) && ((modifier - 1) & 1) === 1;
+		if (hasShift && /^[a-z]$/.test(ch)) {
+			ch = ch.toUpperCase();
 		}
 
-		return null;
+		return ch;
 	}
 
 	private tryStartFindFromInput(data: string): boolean {
@@ -736,6 +751,24 @@ class ModalEditor extends CustomEditor {
 			return true;
 		}
 		if (matchesKey(data, "shift+t")) {
+			this.pendingFind = "T";
+			return true;
+		}
+
+		const printable = this.getPrintableInputChar(data);
+		if (printable === "f") {
+			this.pendingFind = "f";
+			return true;
+		}
+		if (printable === "F") {
+			this.pendingFind = "F";
+			return true;
+		}
+		if (printable === "t") {
+			this.pendingFind = "t";
+			return true;
+		}
+		if (printable === "T") {
 			this.pendingFind = "T";
 			return true;
 		}
