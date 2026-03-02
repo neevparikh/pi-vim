@@ -697,6 +697,11 @@ class ModalEditor extends CustomEditor {
 		if (matchesKey(data, "shift+e")) return "E";
 		if (matchesKey(data, "shift+w")) return "W";
 
+		const printable = this.getPrintableInputChar(data);
+		if (printable !== null) {
+			return printable;
+		}
+
 		return data;
 	}
 

@@ -269,6 +269,16 @@ describe("modal-editor extension motions", () => {
 		assert.equal(editor.getCursor().col, 5);
 	});
 
+	it("supports visual-line entry via Kitty Shift+V CSI-u variants", () => {
+		editor.setText("a\nb\nc");
+		press(editor, "\x1b", "9", "k", "0", "\x1b[118;2u", "j", "d");
+		assert.equal(editor.getText(), "c");
+
+		editor.setText("a\nb\nc");
+		press(editor, "9", "k", "0", "\x1b[86;2u", "j", "d");
+		assert.equal(editor.getText(), "c");
+	});
+
 	it("supports uppercase normal-mode commands from Kitty shift sequences", () => {
 		editor.setText("foo/bar baz");
 		press(editor, "\x1b", "0", "$", "\x1b[98;2u");
