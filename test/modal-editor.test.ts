@@ -554,6 +554,42 @@ describe("modal-editor extension motions", () => {
 		assert.equal(editor.getText(), "ABC def");
 	});
 
+	it("supports text objects iw/aw for c/d/y and case operators", () => {
+		editor.setText("one two three");
+		press(editor, "\x1b", "9", "k", "0", "c", "i", "w", "X", "\x1b");
+		assert.equal(editor.getText(), "X two three");
+
+		editor.setText("one two three");
+		press(editor, "9", "k", "0", "d", "a", "w");
+		assert.equal(editor.getText(), "two three");
+
+		editor.setText("one two");
+		press(editor, "9", "k", "0", "y", "i", "w", "$", "p");
+		assert.equal(editor.getText(), "one twoone");
+
+		editor.setText("one two");
+		press(editor, "9", "k", "0", "g", "U", "i", "w");
+		assert.equal(editor.getText(), "ONE two");
+	});
+
+	it("supports quote and delimiter text objects", () => {
+		editor.setText('say "hello" world');
+		press(editor, "\x1b", "9", "k", "0", "f", "h", "c", "i", '"', "X", "\x1b");
+		assert.equal(editor.getText(), 'say "X" world');
+
+		editor.setText("(abc) def");
+		press(editor, "9", "k", "0", "y", "i", ")", "$", "p");
+		assert.equal(editor.getText(), "(abc) defabc");
+
+		editor.setText("x[ab]y");
+		press(editor, "9", "k", "0", "f", "b", "d", "a", "]");
+		assert.equal(editor.getText(), "xy");
+
+		editor.setText("{ab} cd");
+		press(editor, "9", "k", "0", "g", "U", "i", "{");
+		assert.equal(editor.getText(), "{AB} cd");
+	});
+
 	it("places the visual-mode cursor marker at the actual cursor column", () => {
 		editor.setText("abcdef");
 		press(editor, "\x1b", "0", "3", "l", "v");

@@ -141,6 +141,7 @@ class ModalEditor extends CustomEditor {
 	private pendingOperatorCount = 1;
 	private pendingFind: PendingFind = null;
 	private pendingG = false;
+	private pendingTextObjectPrefix: "i" | "a" | null = null;
 	private lastFindCommand: LastFindCommand | null = null;
 	private visualAnchor: Pos | null = null;
 	private visualScrollOffset = 0;
@@ -224,6 +225,20 @@ class ModalEditor extends CustomEditor {
 		this.handleNormalInput(data);
 	}
 
+	private isOpenBraceInput(data: string): boolean {
+		if (data === "{" || matchesKey(data, "{")) {
+			return true;
+		}
+		return parseKey(data) === "shift+[";
+	}
+
+	private isCloseBraceInput(data: string): boolean {
+		if (data === "}" || matchesKey(data, "}")) {
+			return true;
+		}
+		return parseKey(data) === "shift+]";
+	}
+
 	private handleNormalInput(data: string): void {
 		const printable = this.getPrintableInputChar(data);
 		if (matchesKey(data, "u")) {
@@ -247,11 +262,11 @@ class ModalEditor extends CustomEditor {
 			this.send(SEQ.wordForward, this.consumeCount());
 			return;
 		}
-		if (data === "{" || matchesKey(data, "{") || matchesKey(data, "shift+[")) {
+		if (this.isOpenBraceInput(data)) {
 			this.moveParagraphBackward(this.consumeCount());
 			return;
 		}
-		if (data === "}" || matchesKey(data, "}") || matchesKey(data, "shift+]")) {
+		if (this.isCloseBraceInput(data)) {
 			this.moveParagraphForward(this.consumeCount());
 			return;
 		}
@@ -420,11 +435,11 @@ class ModalEditor extends CustomEditor {
 			this.send(SEQ.wordForward, this.consumeCount());
 			return;
 		}
-		if (data === "{" || matchesKey(data, "{") || matchesKey(data, "shift+[")) {
+		if (this.isOpenBraceInput(data)) {
 			this.moveParagraphBackward(this.consumeCount());
 			return;
 		}
-		if (data === "}" || matchesKey(data, "}") || matchesKey(data, "shift+]")) {
+		if (this.isCloseBraceInput(data)) {
 			this.moveParagraphForward(this.consumeCount());
 			return;
 		}
@@ -540,6 +555,17 @@ class ModalEditor extends CustomEditor {
 	}
 
 	private handlePendingOperatorInput(data: string): void {
+		const command = this.normalizeCommandInput(data);
+		if (this.pendingTextObjectPrefix) {
+			this.handleTextObjectOperand(command);
+			return;
+		}
+
+		if (command === "i" || command === "a") {
+			this.pendingTextObjectPrefix = command;
+			return;
+		}
+
 		switch (this.pendingOperator) {
 			case "d":
 				this.handleDeleteOperator(data);
@@ -569,6 +595,325 @@ class ModalEditor extends CustomEditor {
 				this.resetPending();
 				return;
 		}
+	}
+
+	private handleTextObjectOperand(objectCommand: string): void {
+		const prefix = this.pendingTextObjectPrefix;
+		if (!prefix) {
+			this.resetPending();
+			return;
+		}
+
+		const motionCount = this.consumeCount();
+		const total = Math.max(1, this.pendingOperatorCount * motionCount);
+		const range = this.resolveTextObjectRange(prefix, objectCommand, total);
+		if (!range) {
+			this.resetPending();
+			return;
+		}
+		this.applyOperatorToRange(range.startIndex, range.endIndexExclusive, range.linewise);
+	}
+
+	private resolveTextObjectRange(
+		prefix: "i" | "a",
+		objectCommand: string,
+		count: number,
+	): { startIndex: number; endIndexExclusive: number; linewise: boolean } | null {
+		const includeOuter = prefix === "a";
+		switch (objectCommand) {
+			case "w":
+				return this.findWordTextObjectRange(false, includeOuter, count);
+			case "W":
+				return this.findWordTextObjectRange(true, includeOuter, count);
+			case '"':
+			case "'":
+			case "`":
+				return this.findQuoteTextObjectRange(objectCommand, includeOuter, count);
+			case "(":
+			case ")":
+			case "b":
+				return this.findDelimitedTextObjectRange("(", ")", includeOuter, count);
+			case "[":
+			case "]":
+				return this.findDelimitedTextObjectRange("[", "]", includeOuter, count);
+			case "{":
+			case "}":
+			case "B":
+				return this.findDelimitedTextObjectRange("{", "}", includeOuter, count);
+			default:
+				return null;
+		}
+	}
+
+	private findWordTextObjectRange(
+		bigWord: boolean,
+		includeOuter: boolean,
+		count: number,
+	): { startIndex: number; endIndexExclusive: number; linewise: boolean } | null {
+		const text = this.getText();
+		if (!text) {
+			return null;
+		}
+
+		const cursorIndex = this.posToIndex(this.getLines(), this.getCursor());
+		const classify = (char: string): number => (bigWord ? (isWhitespaceChar(char) ? 0 : 1) : getSmallWordClass(char));
+		const findUnitNear = (fromIndex: number): { start: number; endExclusive: number } | null => {
+			if (!text) {
+				return null;
+			}
+			let probe = Math.max(0, Math.min(fromIndex, text.length - 1));
+			if (classify(text[probe] ?? "") === 0) {
+				let right = probe;
+				while (right < text.length && classify(text[right] ?? "") === 0) {
+					right += 1;
+				}
+				if (right < text.length) {
+					probe = right;
+				} else {
+					let left = probe - 1;
+					while (left >= 0 && classify(text[left] ?? "") === 0) {
+						left -= 1;
+					}
+					if (left < 0) {
+						return null;
+					}
+					probe = left;
+				}
+			}
+
+			const cls = classify(text[probe] ?? "");
+			let start = probe;
+			while (start > 0 && classify(text[start - 1] ?? "") === cls) {
+				start -= 1;
+			}
+			let end = probe + 1;
+			while (end < text.length && classify(text[end] ?? "") === cls) {
+				end += 1;
+			}
+			return { start, endExclusive: end };
+		};
+
+		const first = findUnitNear(cursorIndex);
+		if (!first) {
+			return null;
+		}
+
+		let start = first.start;
+		let endExclusive = first.endExclusive;
+		const repeats = Math.max(1, count);
+		for (let step = 1; step < repeats; step++) {
+			let probe = endExclusive;
+			while (probe < text.length && isWhitespaceChar(text[probe] ?? "")) {
+				probe += 1;
+			}
+			if (probe >= text.length) {
+				break;
+			}
+			const next = findUnitNear(probe);
+			if (!next) {
+				break;
+			}
+			endExclusive = next.endExclusive;
+		}
+
+		if (includeOuter) {
+			let trailing = endExclusive;
+			while (trailing < text.length && isWhitespaceChar(text[trailing] ?? "")) {
+				trailing += 1;
+			}
+			if (trailing > endExclusive) {
+				endExclusive = trailing;
+			} else {
+				while (start > 0 && isWhitespaceChar(text[start - 1] ?? "")) {
+					start -= 1;
+				}
+			}
+		}
+
+		return { startIndex: start, endIndexExclusive: endExclusive, linewise: false };
+	}
+
+	private findQuoteTextObjectRange(
+		quoteChar: string,
+		includeOuter: boolean,
+		count: number,
+	): { startIndex: number; endIndexExclusive: number; linewise: boolean } | null {
+		const lines = this.getLines();
+		const cursor = this.getCursor();
+		const lineText = lines[cursor.line] ?? "";
+		if (!lineText) {
+			return null;
+		}
+
+		const isEscaped = (text: string, index: number): boolean => {
+			let slashes = 0;
+			for (let i = index - 1; i >= 0 && text[i] === "\\"; i--) {
+				slashes += 1;
+			}
+			return slashes % 2 === 1;
+		};
+
+		const quotePositions: number[] = [];
+		for (let i = 0; i < lineText.length; i++) {
+			if (lineText[i] === quoteChar && !isEscaped(lineText, i)) {
+				quotePositions.push(i);
+			}
+		}
+		if (quotePositions.length < 2) {
+			return null;
+		}
+
+		const pairs: Array<{ start: number; end: number }> = [];
+		for (let i = 0; i + 1 < quotePositions.length; i += 2) {
+			pairs.push({ start: quotePositions[i]!, end: quotePositions[i + 1]! });
+		}
+
+		const relCol = Math.max(0, Math.min(cursor.col, lineText.length));
+		let current =
+			pairs
+				.filter((pair) => pair.start <= relCol && relCol <= pair.end)
+				.sort((a, b) => a.end - a.start - (b.end - b.start))[0] ?? null;
+		if (!current) {
+			const nearby = pairs.find((pair) => pair.start >= relCol) ?? pairs[pairs.length - 1] ?? null;
+			current = nearby;
+		}
+		if (!current) {
+			return null;
+		}
+
+		const repeats = Math.max(1, count);
+		for (let step = 1; step < repeats; step++) {
+			const outer =
+				pairs
+					.filter((pair) => pair.start < current!.start && pair.end > current!.end)
+					.sort((a, b) => a.end - a.start - (b.end - b.start))[0] ?? null;
+			if (!outer) {
+				break;
+			}
+			current = outer;
+		}
+
+		const lineStartIndex = this.posToIndex(lines, { line: cursor.line, col: 0 });
+		const start = lineStartIndex + (includeOuter ? current.start : current.start + 1);
+		const end = lineStartIndex + (includeOuter ? current.end + 1 : current.end);
+		if (start >= end) {
+			return null;
+		}
+		return { startIndex: start, endIndexExclusive: end, linewise: false };
+	}
+
+	private findDelimitedTextObjectRange(
+		open: string,
+		close: string,
+		includeOuter: boolean,
+		count: number,
+	): { startIndex: number; endIndexExclusive: number; linewise: boolean } | null {
+		const text = this.getText();
+		if (!text) {
+			return null;
+		}
+		const cursorIndex = this.posToIndex(this.getLines(), this.getCursor());
+		const stack: number[] = [];
+		const pairs: Array<{ start: number; end: number }> = [];
+		for (let i = 0; i < text.length; i++) {
+			const ch = text[i] ?? "";
+			if (ch === open) {
+				stack.push(i);
+			} else if (ch === close) {
+				const start = stack.pop();
+				if (start !== undefined) {
+					pairs.push({ start, end: i });
+				}
+			}
+		}
+		if (pairs.length === 0) {
+			return null;
+		}
+
+		let current =
+			pairs
+				.filter((pair) => pair.start <= cursorIndex && cursorIndex <= pair.end)
+				.sort((a, b) => a.end - a.start - (b.end - b.start))[0] ?? null;
+		if (!current) {
+			return null;
+		}
+
+		const repeats = Math.max(1, count);
+		for (let step = 1; step < repeats; step++) {
+			const outer =
+				pairs
+					.filter((pair) => pair.start < current!.start && pair.end > current!.end)
+					.sort((a, b) => a.end - a.start - (b.end - b.start))[0] ?? null;
+			if (!outer) {
+				break;
+			}
+			current = outer;
+		}
+
+		const start = includeOuter ? current.start : current.start + 1;
+		const end = includeOuter ? current.end + 1 : current.end;
+		if (start >= end) {
+			return null;
+		}
+		return { startIndex: start, endIndexExclusive: end, linewise: false };
+	}
+
+	private applyOperatorToRange(startIndex: number, endIndexExclusive: number, linewise: boolean): void {
+		const operator = this.pendingOperator;
+		if (!operator) {
+			this.resetPending();
+			return;
+		}
+
+		const fullText = this.getText();
+		const start = Math.max(0, Math.min(startIndex, fullText.length));
+		const end = Math.max(start, Math.min(endIndexExclusive, fullText.length));
+		if (start >= end) {
+			this.resetPending();
+			return;
+		}
+		const segment = fullText.slice(start, end);
+
+		if (operator === "y") {
+			this.writeClipboard(segment, linewise ? "linewise" : "charwise");
+			this.resetPending();
+			return;
+		}
+
+		if (operator === ">" || operator === "<") {
+			const startPos = this.indexToPos(fullText, start);
+			const endPos = this.indexToPos(fullText, Math.max(start, end - 1));
+			this.indentLineRange(startPos.line, endPos.line - startPos.line + 1, operator === ">");
+			return;
+		}
+
+		if (operator === "d" || operator === "c") {
+			this.writeClipboard(segment, linewise ? "linewise" : "charwise");
+			this.withTrackedEdit(() => {
+				const text = this.getText();
+				const nextText = text.slice(0, start) + text.slice(end);
+				this.setTextAndMoveCursor(nextText, this.indexToPos(nextText, start));
+			});
+			if (operator === "c") {
+				this.mode = "insert";
+			}
+			this.resetPending();
+			return;
+		}
+
+		if (operator === "g~" || operator === "gu" || operator === "gU") {
+			const kind = operator === "g~" ? "toggle" : operator === "gu" ? "lower" : "upper";
+			const replacement = this.transformCase(segment, kind);
+			this.withTrackedEdit(() => {
+				const text = this.getText();
+				const nextText = text.slice(0, start) + replacement + text.slice(end);
+				this.setTextAndMoveCursor(nextText, this.indexToPos(nextText, start));
+			});
+			this.resetPending();
+			return;
+		}
+
+		this.resetPending();
 	}
 
 	private mapOperatorCommandToDeleteMotion(data: string, operator: PendingOperator): string {
@@ -949,8 +1294,9 @@ class ModalEditor extends CustomEditor {
 		if (matchesKey(data, ")")) return ")";
 		if (matchesKey(data, "{")) return "{";
 		if (matchesKey(data, "}")) return "}";
-		if (matchesKey(data, "shift+[")) return "{";
-		if (matchesKey(data, "shift+]")) return "}";
+		const parsed = parseKey(data);
+		if (parsed === "shift+[") return "{";
+		if (parsed === "shift+]") return "}";
 
 		if (matchesKey(data, "shift+b")) return "B";
 		if (matchesKey(data, "shift+d")) return "D";
@@ -2238,7 +2584,13 @@ class ModalEditor extends CustomEditor {
 	}
 
 	private hasPendingCommand(): boolean {
-		return this.pendingCount.length > 0 || this.pendingOperator !== null || this.pendingFind !== null || this.pendingG;
+		return (
+			this.pendingCount.length > 0 ||
+			this.pendingOperator !== null ||
+			this.pendingFind !== null ||
+			this.pendingG ||
+			this.pendingTextObjectPrefix !== null
+		);
 	}
 
 	private consumeCount(defaultValue: number = 1): number {
@@ -2256,6 +2608,7 @@ class ModalEditor extends CustomEditor {
 		this.pendingOperatorCount = 1;
 		this.pendingFind = null;
 		this.pendingG = false;
+		this.pendingTextObjectPrefix = null;
 	}
 
 	private getModeBorderColor(base: (text: string) => string): (text: string) => string {
@@ -2291,7 +2644,7 @@ class ModalEditor extends CustomEditor {
 		}
 
 		if (this.mode !== "insert") {
-			const pending = `${this.pendingOperator ?? ""}${this.pendingG ? "g" : ""}${this.pendingFind ?? ""}${this.pendingCount}`;
+			const pending = `${this.pendingOperator ?? ""}${this.pendingG ? "g" : ""}${this.pendingFind ?? ""}${this.pendingTextObjectPrefix ?? ""}${this.pendingCount}`;
 			if (pending.length > 0) {
 				label = `${label.slice(0, -1)} [${pending}] `;
 			}
