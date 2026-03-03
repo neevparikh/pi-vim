@@ -31,7 +31,7 @@ const SEQ = {
 } as const;
 
 type Mode = "normal" | "insert" | "visual" | "visual_line";
-type PendingOperator = "d" | null;
+type PendingOperator = "d" | "c" | "y" | ">" | "<" | "g~" | "gu" | "gU" | null;
 type PendingFind = "f" | "F" | "t" | "T" | null;
 type FindType = Exclude<PendingFind, null>;
 type RegisterType = "charwise" | "linewise";
@@ -183,6 +183,10 @@ class ModalEditor extends CustomEditor {
 		}
 
 		if (this.pendingFind) {
+			if (this.pendingOperator && this.pendingOperator !== "d") {
+				this.handlePendingOperatorInput(data);
+				return;
+			}
 			const targetChar = this.getPrintableInputChar(data);
 			if (targetChar !== null) {
 				this.applyFind(targetChar);
@@ -192,8 +196,8 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 
-		if (this.pendingOperator === "d" && data === "0" && this.pendingCount.length === 0) {
-			this.handleDeleteOperator(data);
+		if (this.pendingOperator && data === "0" && this.pendingCount.length === 0) {
+			this.handlePendingOperatorInput(data);
 			return;
 		}
 
@@ -207,8 +211,8 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 
-		if (this.pendingOperator === "d") {
-			this.handleDeleteOperator(data);
+		if (this.pendingOperator) {
+			this.handlePendingOperatorInput(data);
 			return;
 		}
 
@@ -226,11 +230,11 @@ class ModalEditor extends CustomEditor {
 			this.undo();
 			return;
 		}
-		if (matchesKey(data, "shift+u") || printable === "U") {
+		if ((matchesKey(data, "shift+u") || printable === "U") && !this.pendingG) {
 			this.redo();
 			return;
 		}
-		if (matchesKey(data, "y") || matchesKey(data, "shift+y") || printable === "Y") {
+		if (matchesKey(data, "shift+y") || printable === "Y") {
 			this.copyCurrentLine();
 			this.resetPending();
 			return;
@@ -324,6 +328,22 @@ class ModalEditor extends CustomEditor {
 				return;
 			case "d":
 				this.pendingOperator = "d";
+				this.pendingOperatorCount = this.consumeCount();
+				return;
+			case "c":
+				this.pendingOperator = "c";
+				this.pendingOperatorCount = this.consumeCount();
+				return;
+			case "y":
+				this.pendingOperator = "y";
+				this.pendingOperatorCount = this.consumeCount();
+				return;
+			case ">":
+				this.pendingOperator = ">";
+				this.pendingOperatorCount = this.consumeCount();
+				return;
+			case "<":
+				this.pendingOperator = "<";
 				this.pendingOperatorCount = this.consumeCount();
 				return;
 			case "D":
@@ -519,6 +539,227 @@ class ModalEditor extends CustomEditor {
 		}
 	}
 
+	private handlePendingOperatorInput(data: string): void {
+		switch (this.pendingOperator) {
+			case "d":
+				this.handleDeleteOperator(data);
+				return;
+			case "c":
+				this.handleChangeOperator(data);
+				return;
+			case "y":
+				this.handleYankOperator(data);
+				return;
+			case ">":
+				this.handleIndentOperator(data, true);
+				return;
+			case "<":
+				this.handleIndentOperator(data, false);
+				return;
+			case "g~":
+				this.handleCaseOperator(data, "toggle");
+				return;
+			case "gu":
+				this.handleCaseOperator(data, "lower");
+				return;
+			case "gU":
+				this.handleCaseOperator(data, "upper");
+				return;
+			default:
+				this.resetPending();
+				return;
+		}
+	}
+
+	private mapOperatorCommandToDeleteMotion(data: string, operator: PendingOperator): string {
+		const command = this.normalizeCommandInput(data);
+		if (operator === "c" && command === "c") return "d";
+		if (operator === "y" && command === "y") return "d";
+		if (operator === "g~" && command === "~") return "d";
+		if (operator === "gu" && command === "u") return "d";
+		if (operator === "gU" && command === "U") return "d";
+		return data;
+	}
+
+	private getDeletedSegment(beforeText: string, afterText: string): { startIndex: number; deletedText: string } | null {
+		if (beforeText === afterText) {
+			return null;
+		}
+
+		let start = 0;
+		const sharedPrefixMax = Math.min(beforeText.length, afterText.length);
+		while (start < sharedPrefixMax && beforeText[start] === afterText[start]) {
+			start += 1;
+		}
+
+		let beforeEnd = beforeText.length - 1;
+		let afterEnd = afterText.length - 1;
+		while (beforeEnd >= start && afterEnd >= start && beforeText[beforeEnd] === afterText[afterEnd]) {
+			beforeEnd -= 1;
+			afterEnd -= 1;
+		}
+
+		const deletedText = beforeText.slice(start, beforeEnd + 1);
+		if (!deletedText) {
+			return null;
+		}
+		return { startIndex: start, deletedText };
+	}
+
+	private runDeleteProxy(data: string, operator: Exclude<PendingOperator, null | "d">): {
+		status: "pending" | "applied" | "noop";
+		before: Snapshot;
+		after: Snapshot;
+		deleted: { startIndex: number; deletedText: string } | null;
+		linewise: boolean;
+		undoBackup: Snapshot[];
+		redoBackup: Snapshot[];
+	} {
+		const before = this.captureSnapshot();
+		const undoBackup = [...this.undoHistory];
+		const redoBackup = [...this.redoHistory];
+		const forwardedData = this.mapOperatorCommandToDeleteMotion(data, operator);
+
+		this.pendingOperator = "d";
+		this.handleDeleteOperator(forwardedData);
+		const after = this.captureSnapshot();
+
+		if (this.pendingFind || this.pendingG) {
+			this.pendingOperator = operator;
+			this.undoHistory = undoBackup;
+			this.redoHistory = redoBackup;
+			this.restoreSnapshot(before);
+			return { status: "pending", before, after, deleted: null, linewise: false, undoBackup, redoBackup };
+		}
+
+		const deleted = this.getDeletedSegment(before.text, after.text);
+		if (!deleted) {
+			return { status: "noop", before, after, deleted: null, linewise: false, undoBackup, redoBackup };
+		}
+
+		const normalized = this.normalizeCommandInput(forwardedData);
+		const linewise = normalized === "d" || normalized === "j" || normalized === "k";
+		return { status: "applied", before, after, deleted, linewise, undoBackup, redoBackup };
+	}
+
+	private handleChangeOperator(data: string): void {
+		const result = this.runDeleteProxy(data, "c");
+		if (result.status === "pending") {
+			return;
+		}
+		if (result.status === "applied") {
+			this.mode = "insert";
+		}
+	}
+
+	private handleYankOperator(data: string): void {
+		const result = this.runDeleteProxy(data, "y");
+		if (result.status === "pending") {
+			return;
+		}
+
+		this.undoHistory = result.undoBackup;
+		this.redoHistory = result.redoBackup;
+		this.restoreSnapshot(result.before);
+
+		if (result.status === "applied" && result.deleted) {
+			this.writeClipboard(result.deleted.deletedText, result.linewise ? "linewise" : "charwise");
+		}
+		this.resetPending();
+	}
+
+	private transformCase(text: string, kind: "toggle" | "lower" | "upper"): string {
+		if (kind === "lower") {
+			return text.toLowerCase();
+		}
+		if (kind === "upper") {
+			return text.toUpperCase();
+		}
+		let out = "";
+		for (const ch of text) {
+			const lower = ch.toLowerCase();
+			const upper = ch.toUpperCase();
+			if (ch === lower && ch !== upper) out += upper;
+			else if (ch === upper && ch !== lower) out += lower;
+			else out += ch;
+		}
+		return out;
+	}
+
+	private handleCaseOperator(data: string, kind: "toggle" | "lower" | "upper"): void {
+		const operator = this.pendingOperator;
+		if (!operator || operator === "d") {
+			this.resetPending();
+			return;
+		}
+		const result = this.runDeleteProxy(data, operator as Exclude<PendingOperator, null | "d">);
+		if (result.status === "pending") {
+			return;
+		}
+
+		this.undoHistory = result.undoBackup;
+		this.redoHistory = result.redoBackup;
+		this.restoreSnapshot(result.before);
+
+		if (result.status === "applied" && result.deleted) {
+			const replacement = this.transformCase(result.deleted.deletedText, kind);
+			this.withTrackedEdit(() => {
+				const text = this.getText();
+				const start = result.deleted!.startIndex;
+				const end = start + result.deleted!.deletedText.length;
+				const nextText = text.slice(0, start) + replacement + text.slice(end);
+				this.setTextAndMoveCursor(nextText, this.indexToPos(nextText, start));
+			});
+		}
+		this.resetPending();
+	}
+
+	private handleIndentOperator(data: string, indent: boolean): void {
+		const op = indent ? ">" : "<";
+		const command = this.normalizeCommandInput(data);
+		const motionCount = this.consumeCount();
+		const total = Math.max(1, this.pendingOperatorCount * motionCount);
+		const cursor = this.getCursor();
+
+		if (command === op) {
+			this.indentLineRange(cursor.line, total, indent);
+			return;
+		}
+		if (command === "j") {
+			this.indentLineRange(cursor.line, total + 1, indent);
+			return;
+		}
+		if (command === "k") {
+			const startLine = Math.max(0, cursor.line - total);
+			const lines = cursor.line - startLine + 1;
+			this.indentLineRange(startLine, lines, indent);
+			return;
+		}
+		this.resetPending();
+	}
+
+	private indentLineRange(startLine: number, count: number, indent: boolean): void {
+		const width = 2;
+		this.withTrackedEdit(() => {
+			const lines = this.getLines();
+			const start = Math.max(0, Math.min(startLine, Math.max(0, lines.length - 1)));
+			const endExclusive = Math.min(lines.length, start + Math.max(1, count));
+			for (let i = start; i < endExclusive; i++) {
+				const line = lines[i] ?? "";
+				if (indent) {
+					lines[i] = `${" ".repeat(width)}${line}`;
+				} else if (line.startsWith("\t")) {
+					lines[i] = line.slice(1);
+				} else {
+					const spacePrefix = line.match(/^ +/)?.[0].length ?? 0;
+					lines[i] = line.slice(Math.min(width, spacePrefix));
+				}
+			}
+			this.setTextAndMoveCursor(lines.join("\n"), this.getCursor());
+		});
+		this.resetPending();
+	}
+
 	private handleDeleteOperator(data: string): void {
 		const printable = this.getPrintableInputChar(data);
 		if ((matchesKey(data, "shift+e") || matchesKey(data, "shift+w") || printable === "E" || printable === "W") && !this.pendingG) {
@@ -638,6 +879,21 @@ class ModalEditor extends CustomEditor {
 			case "E":
 				this.moveWordEndBackward(this.consumeCount(), true);
 				return;
+			case "~":
+				this.pendingOperator = "g~";
+				this.pendingOperatorCount = this.consumeCount();
+				this.pendingG = false;
+				return;
+			case "u":
+				this.pendingOperator = "gu";
+				this.pendingOperatorCount = this.consumeCount();
+				this.pendingG = false;
+				return;
+			case "U":
+				this.pendingOperator = "gU";
+				this.pendingOperatorCount = this.consumeCount();
+				this.pendingG = false;
+				return;
 			default:
 				this.resetPending();
 				return;
@@ -674,6 +930,11 @@ class ModalEditor extends CustomEditor {
 		if (matchesKey(data, "e")) return "e";
 		if (matchesKey(data, "x")) return "x";
 		if (matchesKey(data, "d")) return "d";
+		if (matchesKey(data, "c")) return "c";
+		if (matchesKey(data, "y")) return "y";
+		if (matchesKey(data, ">")) return ">";
+		if (matchesKey(data, "<")) return "<";
+		if (matchesKey(data, "~")) return "~";
 		if (matchesKey(data, "v")) return "v";
 		if (matchesKey(data, "shift+v")) return "V";
 		if (matchesKey(data, "i")) return "i";

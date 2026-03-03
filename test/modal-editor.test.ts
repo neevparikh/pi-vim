@@ -406,7 +406,7 @@ describe("modal-editor extension motions", () => {
 
 	it("uses linewise paste semantics for normal-mode p after line yanks", () => {
 		editor.setText("a\nb\nc");
-		press(editor, "\x1b", "2", "k", "0", "y", "p");
+		press(editor, "\x1b", "2", "k", "0", "y", "y", "p");
 		assert.equal(editor.getText(), "a\na\nb\nc");
 
 		editor.setText("a\nb\nc\nd");
@@ -504,6 +504,54 @@ describe("modal-editor extension motions", () => {
 		editor.setText("a\nb\nc\nd");
 		press(editor, "\x1b", "k", "d", "k");
 		assert.equal(editor.getText(), "a\nd");
+	});
+
+	it("supports change operator basics c$, cc, and cw", () => {
+		editor.setText("abc def");
+		press(editor, "\x1b", "9", "k", "0", "4", "l", "c", "$", "X", "\x1b");
+		assert.equal(editor.getText(), "abc X");
+
+		editor.setText("a\nb\nc");
+		press(editor, "9", "k", "0", "j", "c", "c", "X", "\x1b");
+		assert.equal(editor.getText(), "a\nXc");
+
+		editor.setText("word next");
+		press(editor, "9", "k", "0", "c", "w", "X", "\x1b");
+		assert.equal(editor.getText(), "X next");
+	});
+
+	it("supports operator-pending yank motions", () => {
+		editor.setText("a\nb\nc");
+		press(editor, "\x1b", "9", "k", "0", "y", "y", "p");
+		assert.equal(editor.getText(), "a\na\nb\nc");
+
+		editor.setText("a\nb\nc");
+		press(editor, "9", "k", "0", "y", "j", "p");
+		assert.equal(editor.getText(), "a\na\nb\nb\nc");
+	});
+
+	it("supports indent and outdent operators", () => {
+		editor.setText("a\nb\nc");
+		press(editor, "\x1b", "9", "k", "0", ">", ">");
+		assert.equal(editor.getText(), "  a\nb\nc");
+
+		press(editor, "<", "<");
+		assert.equal(editor.getText(), "a\nb\nc");
+
+		press(editor, ">", "j");
+		assert.equal(editor.getText(), "  a\n  b\nc");
+	});
+
+	it("supports g~ / gu / gU operators", () => {
+		editor.setText("abc def");
+		press(editor, "\x1b", "9", "k", "0", "g", "U", "w");
+		assert.equal(editor.getText(), "ABC def");
+
+		press(editor, "9", "k", "0", "g", "u", "w");
+		assert.equal(editor.getText(), "abc def");
+
+		press(editor, "9", "k", "0", "g", "~", "w");
+		assert.equal(editor.getText(), "ABC def");
 	});
 
 	it("places the visual-mode cursor marker at the actual cursor column", () => {
