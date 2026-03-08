@@ -10,8 +10,8 @@
  * - Clipboard: y/Y copy, p paste (works in visual mode too)
  */
 
-import { execSync } from "node:child_process";
-import { copyToClipboard, CustomEditor, type ExtensionAPI, type Theme } from "@mariozechner/pi-coding-agent";
+import { execSync, spawn, type IOType } from "node:child_process";
+import { CustomEditor, type ExtensionAPI, type Theme } from "@mariozechner/pi-coding-agent";
 import { CURSOR_MARKER, matchesKey, parseKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 const SEQ = {
@@ -2221,38 +2221,105 @@ class ModalEditor extends CustomEditor {
 		return { text, type };
 	}
 
+	/** Returns true when no X11/Wayland display is available (e.g. headless server over SSH). */
+	private static isHeadlessLinux(): boolean {
+		return process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY && !process.env.TERMUX_VERSION;
+	}
+
+	private static isWayland(): boolean {
+		return Boolean(process.env.WAYLAND_DISPLAY) || process.env.XDG_SESSION_TYPE === "wayland";
+	}
+
 	private writeClipboard(text: string, type: RegisterType): void {
 		this.clipboardFallback = text;
 		this.clipboardFallbackType = type;
-		copyToClipboard(text);
+
+		// Always emit OSC 52 — works over SSH/mosh when the terminal supports it (kitty, iTerm2, etc.)
+		const encoded = Buffer.from(text).toString("base64");
+		process.stdout.write(`\x1b]52;c;${encoded}\x07`);
+
+		// On headless Linux (SSH), skip native clipboard tools entirely — they can't work without a display.
+		if (ModalEditor.isHeadlessLinux()) {
+			return;
+		}
+
+		// Best-effort native clipboard write (suppress stderr to avoid TUI corruption).
+		const options = { input: text, timeout: 5000, stdio: ["pipe" as IOType, "ignore" as IOType, "ignore" as IOType] };
+		try {
+			if (process.platform === "darwin") {
+				execSync("pbcopy", options);
+			} else if (process.platform === "win32") {
+				execSync("clip", options);
+			} else {
+				if (process.env.TERMUX_VERSION) {
+					try {
+						execSync("termux-clipboard-set", options);
+						return;
+					} catch {
+						// fall through
+					}
+				}
+				if (ModalEditor.isWayland()) {
+					try {
+						execSync("which wl-copy", { stdio: "ignore", timeout: 5000 });
+						const proc = spawn("wl-copy", [], { stdio: ["pipe", "ignore", "ignore"] });
+						proc.stdin.on("error", () => {}); // ignore EPIPE
+						proc.stdin.write(text);
+						proc.stdin.end();
+						proc.unref();
+					} catch {
+						try {
+							execSync("xclip -selection clipboard", options);
+						} catch {
+							execSync("xsel --clipboard --input", options);
+						}
+					}
+				} else {
+					try {
+						execSync("xclip -selection clipboard", options);
+					} catch {
+						execSync("xsel --clipboard --input", options);
+					}
+				}
+			}
+		} catch {
+			// Ignore — OSC 52 already emitted as fallback
+		}
 	}
 
 	private readClipboardText(): string | null {
+		// On headless Linux (SSH), native clipboard tools can't work — skip entirely.
+		if (ModalEditor.isHeadlessLinux()) {
+			return null;
+		}
+
+		// Suppress stderr on all execSync calls to avoid TUI corruption.
+		const opts = { encoding: "utf8" as const, timeout: 5000, stdio: ["pipe" as IOType, "pipe" as IOType, "ignore" as IOType] };
 		try {
 			if (process.platform === "darwin") {
-				return execSync("pbpaste", { encoding: "utf8", timeout: 5000 });
+				return execSync("pbpaste", opts);
 			}
 			if (process.platform === "win32") {
-				return execSync("powershell -NoProfile -Command Get-Clipboard", { encoding: "utf8", timeout: 5000 });
+				return execSync("powershell -NoProfile -Command Get-Clipboard", opts);
 			}
 			if (process.env.TERMUX_VERSION) {
 				try {
-					return execSync("termux-clipboard-get", { encoding: "utf8", timeout: 5000 });
+					return execSync("termux-clipboard-get", opts);
 				} catch {
 					// fall through
 				}
 			}
-			if (process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === "wayland") {
+			if (ModalEditor.isWayland()) {
 				try {
-					return execSync("wl-paste --no-newline", { encoding: "utf8", timeout: 5000 });
+					return execSync("wl-paste --no-newline", opts);
 				} catch {
 					// fall through
 				}
 			}
 			try {
-				return execSync("xclip -selection clipboard -o", { encoding: "utf8", timeout: 5000 });
+				return execSync("xclip -selection clipboard -o", opts);
 			} catch {
-				return execSync("xsel --clipboard --output", { encoding: "utf8", timeout: 5000 });
+				return execSync("xsel --clipboard --output", opts);
 			}
 		} catch {
 			return null;
