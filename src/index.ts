@@ -293,6 +293,9 @@ class ModalEditor extends CustomEditor {
 			case "l":
 				this.send(SEQ.right, this.consumeCount());
 				return;
+			case "G":
+				this.moveToAbsoluteLine("last");
+				return;
 			case "$":
 				this.send(SEQ.lineEnd);
 				this.resetPending();
@@ -499,6 +502,9 @@ class ModalEditor extends CustomEditor {
 				return;
 			case "l":
 				this.send(SEQ.right, this.consumeCount());
+				return;
+			case "G":
+				this.moveToAbsoluteLine("last");
 				return;
 			case "$":
 				this.send(SEQ.lineEnd);
@@ -951,6 +957,17 @@ class ModalEditor extends CustomEditor {
 		return { startIndex: start, deletedText };
 	}
 
+	private normalizeLinewiseRegisterText(text: string): string {
+		let normalized = text;
+		if (normalized.startsWith("\n")) {
+			normalized = normalized.slice(1);
+		}
+		if (normalized.endsWith("\n")) {
+			normalized = normalized.slice(0, -1);
+		}
+		return normalized;
+	}
+
 	private runDeleteProxy(data: string, operator: Exclude<PendingOperator, null | "d">): {
 		status: "pending" | "applied" | "noop";
 		before: Snapshot;
@@ -964,6 +981,7 @@ class ModalEditor extends CustomEditor {
 		const undoBackup = [...this.undoHistory];
 		const redoBackup = [...this.redoHistory];
 		const forwardedData = this.mapOperatorCommandToDeleteMotion(data, operator);
+		const hadPendingG = this.pendingG;
 
 		this.pendingOperator = "d";
 		this.handleDeleteOperator(forwardedData);
@@ -983,7 +1001,7 @@ class ModalEditor extends CustomEditor {
 		}
 
 		const normalized = this.normalizeCommandInput(forwardedData);
-		const linewise = normalized === "d" || normalized === "j" || normalized === "k";
+		const linewise = normalized === "d" || normalized === "j" || normalized === "k" || normalized === "G" || (hadPendingG && normalized === "g");
 		return { status: "applied", before, after, deleted, linewise, undoBackup, redoBackup };
 	}
 
@@ -1008,7 +1026,8 @@ class ModalEditor extends CustomEditor {
 		this.restoreSnapshot(result.before);
 
 		if (result.status === "applied" && result.deleted) {
-			this.writeClipboard(result.deleted.deletedText, result.linewise ? "linewise" : "charwise");
+			const text = result.linewise ? this.normalizeLinewiseRegisterText(result.deleted.deletedText) : result.deleted.deletedText;
+			this.writeClipboard(text, result.linewise ? "linewise" : "charwise");
 		}
 		this.resetPending();
 	}
@@ -1180,6 +1199,9 @@ class ModalEditor extends CustomEditor {
 				this.resetPending();
 				return;
 			}
+			case "G":
+				this.deleteLinesThroughAbsoluteLine("last");
+				return;
 			case "h": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
@@ -1218,6 +1240,9 @@ class ModalEditor extends CustomEditor {
 
 	private handlePendingGMotion(command: string): void {
 		switch (command) {
+			case "g":
+				this.moveToAbsoluteLine("first");
+				return;
 			case "e":
 				this.moveWordEndBackward(this.consumeCount(), false);
 				return;
@@ -1247,6 +1272,9 @@ class ModalEditor extends CustomEditor {
 
 	private handlePendingGDeleteMotion(command: string): void {
 		switch (command) {
+			case "g":
+				this.deleteLinesThroughAbsoluteLine("first");
+				return;
 			case "e": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
@@ -1305,6 +1333,7 @@ class ModalEditor extends CustomEditor {
 		if (matchesKey(data, "shift+o")) return "O";
 		if (matchesKey(data, "shift+j")) return "J";
 		if (matchesKey(data, "shift+e")) return "E";
+		if (matchesKey(data, "shift+g")) return "G";
 		if (matchesKey(data, "shift+w")) return "W";
 
 		const printable = this.getPrintableInputChar(data);
@@ -1617,6 +1646,37 @@ class ModalEditor extends CustomEditor {
 
 		this.moveCursorTo({ line: targetLine, col: 0 });
 		this.resetPending();
+	}
+
+	private getAbsoluteLineTarget(defaultLine: "first" | "last"): number {
+		const lines = this.getLines();
+		if (this.pendingCount.length === 0) {
+			return defaultLine === "first" ? 0 : lines.length - 1;
+		}
+
+		const targetLine = this.consumeCount() - 1;
+		return Math.max(0, Math.min(targetLine, lines.length - 1));
+	}
+
+	private getFirstNonBlankCol(line: string): number {
+		const firstNonBlank = line.search(/\S/);
+		return firstNonBlank >= 0 ? firstNonBlank : 0;
+	}
+
+	private moveToAbsoluteLine(defaultLine: "first" | "last"): void {
+		const lines = this.getLines();
+		const targetLine = this.getAbsoluteLineTarget(defaultLine);
+		const targetCol = this.getFirstNonBlankCol(lines[targetLine] ?? "");
+		this.moveCursorTo({ line: targetLine, col: targetCol });
+		this.resetPending();
+	}
+
+	private deleteLinesThroughAbsoluteLine(defaultLine: "first" | "last"): void {
+		const cursorLine = this.getCursor().line;
+		const targetLine = this.getAbsoluteLineTarget(defaultLine);
+		const startLine = Math.min(cursorLine, targetLine);
+		const deleteCount = Math.abs(cursorLine - targetLine) + 1;
+		this.deleteLinesAt(startLine, deleteCount);
 	}
 
 	private moveToMatchingPair(count: number = this.consumeCount()): void {
@@ -1943,7 +2003,7 @@ class ModalEditor extends CustomEditor {
 	private enterInsertAtFirstNonBlank(): void {
 		const { line } = this.getCursor();
 		const currentLine = this.getLines()[line] ?? "";
-		const firstNonBlank = currentLine.search(/\S/);
+		const firstNonBlank = this.getFirstNonBlankCol(currentLine);
 		this.send(SEQ.lineStart);
 		if (firstNonBlank > 0) {
 			this.send(SEQ.right, firstNonBlank);

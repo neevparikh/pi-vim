@@ -80,6 +80,29 @@ function press(editor: TestEditor, ...keys: string[]): void {
 	}
 }
 
+function getCursorAfter(text: string, ...keys: string[]): { line: number; col: number } {
+	const editor = createEditor();
+	editor.setText(text);
+	press(editor, ...keys);
+	return editor.getCursor();
+}
+
+function getTextAfter(text: string, ...keys: string[]): string {
+	const editor = createEditor();
+	editor.setText(text);
+	press(editor, ...keys);
+	return editor.getText();
+}
+
+function deleteLineRange(text: string, startLine: number, endLine: number): string {
+	const lines = text.split("\n");
+	const remaining = [...lines.slice(0, startLine), ...lines.slice(endLine + 1)];
+	if (remaining.length === 0) {
+		remaining.push("");
+	}
+	return remaining.join("\n");
+}
+
 describe("modal-editor extension motions", () => {
 	let editor: TestEditor;
 	let originalWrite: typeof process.stdout.write;
@@ -229,6 +252,119 @@ describe("modal-editor extension motions", () => {
 		editor.setText("one\ntwo\n\nthree\nfour\n\nfive");
 		press(editor, "9", "k", "0", "}", "j", "{");
 		assert.deepEqual(editor.getCursor(), { line: 3, col: 0 });
+	});
+
+	it("supports absolute line motions gg and G", () => {
+		editor.setText("  one\n   two\nthree\n  four");
+		press(editor, "\x1b", "9", "k", "0", "G");
+		assert.deepEqual(editor.getCursor(), { line: 3, col: 2 });
+
+		press(editor, "g", "g");
+		assert.deepEqual(editor.getCursor(), { line: 0, col: 2 });
+
+		press(editor, "3", "G");
+		assert.deepEqual(editor.getCursor(), { line: 2, col: 0 });
+
+		press(editor, "2", "g", "g");
+		assert.deepEqual(editor.getCursor(), { line: 1, col: 3 });
+
+		editor.setText("   solo");
+		press(editor, "0", "G");
+		assert.deepEqual(editor.getCursor(), { line: 0, col: 3 });
+	});
+
+	it("supports G and gg in visual line mode", () => {
+		editor.setText("a\nb\nc\nd");
+		press(editor, "\x1b", "9", "k", "0", "j", "V", "G", "d");
+		assert.equal(editor.getText(), "a");
+
+		editor.setText("a\nb\nc\nd");
+		press(editor, "\x1b", "9", "k", "0", "j", "j", "V", "g", "g", "d");
+		assert.equal(editor.getText(), "d");
+
+		editor.setText("a\nb\nc\nd\ne");
+		press(editor, "\x1b", "9", "k", "0", "V", "3", "G", "d");
+		assert.equal(editor.getText(), "d\ne");
+	});
+
+	it("supports dG and dgg as linewise motions", () => {
+		editor.setText("a\nb\nc\nd");
+		press(editor, "\x1b", "9", "k", "0", "j", "d", "G");
+		assert.equal(editor.getText(), "a");
+
+		editor.setText("a\nb\nc\nd");
+		press(editor, "\x1b", "9", "k", "0", "j", "j", "d", "g", "g");
+		assert.equal(editor.getText(), "d");
+
+		editor.setText("a\nb\nc");
+		press(editor, "\x1b", "G", "d", "G");
+		assert.equal(editor.getText(), "a\nb");
+
+		editor.setText("a");
+		press(editor, "\x1b", "0", "d", "G");
+		assert.equal(editor.getText(), "");
+	});
+
+	it("keeps supported motions aligned between normal mode and visual-line mode", () => {
+		const cases: Array<{ text: string; setup: string[]; motion: string[] }> = [
+			{ text: "abcd", setup: ["\x1b", "0", "2", "l"], motion: ["h"] },
+			{ text: "one\ntwo\nthree", setup: ["\x1b", "9", "k", "0"], motion: ["j"] },
+			{ text: "one\ntwo\nthree", setup: ["\x1b", "j", "0"], motion: ["k"] },
+			{ text: "abcd", setup: ["\x1b", "0"], motion: ["2", "l"] },
+			{ text: "alpha beta", setup: ["\x1b", "0", "$"], motion: ["0"] },
+			{ text: "alpha beta", setup: ["\x1b", "0"], motion: ["$"] },
+			{ text: "alpha beta gamma", setup: ["\x1b", "0"], motion: ["w"] },
+			{ text: "foo/bar baz qux", setup: ["\x1b", "0"], motion: ["2", "W"] },
+			{ text: "alpha beta gamma", setup: ["\x1b", "0", "$"], motion: ["b"] },
+			{ text: "foo/bar baz", setup: ["\x1b", "0", "$"], motion: ["B"] },
+			{ text: "alpha beta gamma", setup: ["\x1b", "0"], motion: ["E"] },
+			{ text: "foo/bar baz qux", setup: ["\x1b", "0", "2", "W"], motion: ["g", "e"] },
+			{ text: "foo/bar baz qux", setup: ["\x1b", "0", "2", "W"], motion: ["g", "E"] },
+			{ text: "abXcdXefXgh", setup: ["\x1b", "0"], motion: ["f", "X"] },
+			{ text: "abXcdXefXgh", setup: ["\x1b", "0"], motion: ["f", "X", ";"] },
+			{ text: "abXcdXefXgh", setup: ["\x1b", "$"], motion: ["F", "X"] },
+			{ text: "abXcdXefXgh", setup: ["\x1b", "$"], motion: ["T", "X"] },
+			{ text: "abXcdXefXgh", setup: ["\x1b", "0"], motion: ["t", "X"] },
+			{ text: "abXcdXefXgh", setup: ["\x1b", "0"], motion: ["f", "X", ","] },
+			{ text: "(abc(def)ghi)", setup: ["\x1b", "0"], motion: ["%"] },
+			{ text: "One. Two! Three?", setup: ["\x1b", "0"], motion: [")"] },
+			{ text: "One. Two! Three?", setup: ["\x1b", "0", ")", ")"], motion: ["("] },
+			{ text: "one\ntwo\n\nthree\nfour\n\nfive", setup: ["\x1b", "9", "k", "0"], motion: ["}"] },
+			{ text: "one\ntwo\n\nthree\nfour\n\nfive", setup: ["\x1b", "9", "k", "0", "}", "j"], motion: ["{"] },
+			{ text: "one\ntwo\nthree\nfour", setup: ["\x1b", "9", "k", "0"], motion: ["G"] },
+			{ text: "one\ntwo\nthree\nfour", setup: ["\x1b", "G"], motion: ["g", "g"] },
+			{ text: "one\ntwo\nthree\nfour", setup: ["\x1b", "G"], motion: ["3", "g", "g"] },
+			{ text: "one\ntwo\nthree\nfour", setup: ["\x1b", "9", "k", "0"], motion: ["3", "G"] },
+		];
+
+		for (const { text, setup, motion } of cases) {
+			const normalCursor = getCursorAfter(text, ...setup, ...motion);
+			const visualLineCursor = getCursorAfter(text, ...setup, "V", ...motion);
+			assert.deepEqual(visualLineCursor, normalCursor, `visual-line motion ${motion.join("")} should match normal mode`);
+		}
+	});
+
+	it("applies supported visual-line motions as linewise selections", () => {
+		const cases: Array<{ text: string; setup: string[]; motion: string[] }> = [
+			{ text: "a\nb\nc", setup: ["\x1b", "9", "k", "0"], motion: ["j"] },
+			{ text: "a\nb\nc\nd", setup: ["\x1b", "9", "k", "0"], motion: ["2", "j"] },
+			{ text: "a\nb\nc", setup: ["\x1b", "G", "0"], motion: ["k"] },
+			{ text: "a\nb\nc\nd", setup: ["\x1b", "9", "k", "0", "j"], motion: ["G"] },
+			{ text: "a\nb\nc\nd", setup: ["\x1b", "G", "0", "k"], motion: ["g", "g"] },
+			{ text: "a\nb\nc\nd\ne", setup: ["\x1b", "9", "k", "0"], motion: ["3", "G"] },
+			{ text: "one\ntwo\n\nthree\nfour\n\nfive", setup: ["\x1b", "9", "k", "0"], motion: ["}"] },
+			{ text: "one\ntwo\n\nthree\nfour\n\nfive", setup: ["\x1b", "9", "k", "0", "}", "j"], motion: ["{"] },
+			{ text: "one two\nthree four", setup: ["\x1b", "9", "k", "0"], motion: ["3", "W"] },
+			{ text: "(\nabc\n)", setup: ["\x1b", "9", "k", "0"], motion: ["%"] },
+		];
+
+		for (const { text, setup, motion } of cases) {
+			const startCursor = getCursorAfter(text, ...setup);
+			const endCursor = getCursorAfter(text, ...setup, ...motion);
+			const expected = deleteLineRange(text, Math.min(startCursor.line, endCursor.line), Math.max(startCursor.line, endCursor.line));
+			const visualDeleted = getTextAfter(text, ...setup, "V", ...motion, "d");
+			assert.equal(visualDeleted, expected, `V${motion.join("")}d should delete the selected line range`);
+		}
 	});
 
 	it("supports new motions in visual mode", () => {
@@ -506,7 +642,7 @@ describe("modal-editor extension motions", () => {
 		assert.equal(editor.getText(), "a\nd");
 	});
 
-	it("supports change operator basics c$, cc, and cw", () => {
+	it("supports change operator basics c$, cc, cw, cG, and cgg", () => {
 		editor.setText("abc def");
 		press(editor, "\x1b", "9", "k", "0", "4", "l", "c", "$", "X", "\x1b");
 		assert.equal(editor.getText(), "abc X");
@@ -518,6 +654,14 @@ describe("modal-editor extension motions", () => {
 		editor.setText("word next");
 		press(editor, "9", "k", "0", "c", "w", "X", "\x1b");
 		assert.equal(editor.getText(), "X next");
+
+		editor.setText("a\nb\nc");
+		press(editor, "9", "k", "0", "c", "G", "X", "\x1b");
+		assert.equal(editor.getText(), "X");
+
+		editor.setText("a\nb\nc");
+		press(editor, "G", "c", "g", "g", "X", "\x1b");
+		assert.equal(editor.getText(), "X");
 	});
 
 	it("supports operator-pending yank motions", () => {
@@ -528,6 +672,14 @@ describe("modal-editor extension motions", () => {
 		editor.setText("a\nb\nc");
 		press(editor, "9", "k", "0", "y", "j", "p");
 		assert.equal(editor.getText(), "a\na\nb\nb\nc");
+
+		editor.setText("a\nb\nc\nd");
+		press(editor, "9", "k", "0", "j", "y", "G", "p");
+		assert.equal(editor.getText(), "a\nb\nb\nc\nd\nc\nd");
+
+		editor.setText("a\nb\nc\nd");
+		press(editor, "G", "y", "g", "g", "p");
+		assert.equal(editor.getText(), "a\nb\nc\nd\na\nb\nc\nd");
 	});
 
 	it("supports indent and outdent operators", () => {
