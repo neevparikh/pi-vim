@@ -141,12 +141,14 @@ class ModalEditor extends CustomEditor {
 	private pendingOperatorCount = 1;
 	private pendingFind: PendingFind = null;
 	private pendingG = false;
+	private pendingReplace = false;
 	private pendingTextObjectPrefix: "i" | "a" | null = null;
 	private lastFindCommand: LastFindCommand | null = null;
 	private visualAnchor: Pos | null = null;
 	private visualScrollOffset = 0;
 	private clipboardFallback = "";
 	private clipboardFallbackType: RegisterType = "charwise";
+	private suppressClipboardWrite = false;
 	private undoHistory: Snapshot[] = [];
 	private redoHistory: Snapshot[] = [];
 	private trackingDepth = 0;
@@ -180,6 +182,16 @@ class ModalEditor extends CustomEditor {
 			this.withTrackedEdit(() => {
 				super.handleInput(data);
 			});
+			return;
+		}
+
+		if (this.pendingReplace) {
+			const targetChar = this.getPrintableInputChar(data);
+			if (targetChar !== null) {
+				this.replaceCharsAtCursor(targetChar, this.consumeCount());
+			} else {
+				this.resetPending();
+			}
 			return;
 		}
 
@@ -340,9 +352,14 @@ class ModalEditor extends CustomEditor {
 				this.pendingG = true;
 				return;
 			case "x":
-				this.withTrackedEdit(() => {
-					this.send(SEQ.deleteCharForward, this.consumeCount());
+				this.captureDeleteToClipboard("charwise", () => {
+					this.withTrackedEdit(() => {
+						this.send(SEQ.deleteCharForward, this.consumeCount());
+					});
 				});
+				return;
+			case "r":
+				this.pendingReplace = true;
 				return;
 			case "d":
 				this.pendingOperator = "d";
@@ -365,7 +382,9 @@ class ModalEditor extends CustomEditor {
 				this.pendingOperatorCount = this.consumeCount();
 				return;
 			case "D":
-				this.deleteToLineEnd(this.consumeCount());
+				this.captureDeleteToClipboard("charwise", () => {
+					this.deleteToLineEnd(this.consumeCount());
+				});
 				return;
 			case "v":
 				this.mode = "visual";
@@ -480,7 +499,9 @@ class ModalEditor extends CustomEditor {
 				this.resetPending();
 				return;
 			case "d":
-				this.deleteVisualSelection();
+				this.captureDeleteToClipboard(this.mode === "visual_line" ? "linewise" : "charwise", () => {
+					this.deleteVisualSelection();
+				});
 				return;
 			case "o": {
 				const current = this.getCursor();
@@ -968,6 +989,22 @@ class ModalEditor extends CustomEditor {
 		return normalized;
 	}
 
+	private captureDeleteToClipboard(type: RegisterType, action: () => void): void {
+		const beforeText = this.getText();
+		action();
+		if (this.suppressClipboardWrite) {
+			return;
+		}
+
+		const deleted = this.getDeletedSegment(beforeText, this.getText());
+		if (!deleted) {
+			return;
+		}
+
+		const text = type === "linewise" ? this.normalizeLinewiseRegisterText(deleted.deletedText) : deleted.deletedText;
+		this.writeClipboard(text, type);
+	}
+
 	private runDeleteProxy(data: string, operator: Exclude<PendingOperator, null | "d">): {
 		status: "pending" | "applied" | "noop";
 		before: Snapshot;
@@ -983,8 +1020,14 @@ class ModalEditor extends CustomEditor {
 		const forwardedData = this.mapOperatorCommandToDeleteMotion(data, operator);
 		const hadPendingG = this.pendingG;
 
+		const previousSuppressClipboardWrite = this.suppressClipboardWrite;
+		this.suppressClipboardWrite = true;
 		this.pendingOperator = "d";
-		this.handleDeleteOperator(forwardedData);
+		try {
+			this.handleDeleteOperator(forwardedData);
+		} finally {
+			this.suppressClipboardWrite = previousSuppressClipboardWrite;
+		}
 		const after = this.captureSnapshot();
 
 		if (this.pendingFind || this.pendingG) {
@@ -1010,7 +1053,9 @@ class ModalEditor extends CustomEditor {
 		if (result.status === "pending") {
 			return;
 		}
-		if (result.status === "applied") {
+		if (result.status === "applied" && result.deleted) {
+			const text = result.linewise ? this.normalizeLinewiseRegisterText(result.deleted.deletedText) : result.deleted.deletedText;
+			this.writeClipboard(text, result.linewise ? "linewise" : "charwise");
 			this.mode = "insert";
 		}
 	}
@@ -1129,10 +1174,12 @@ class ModalEditor extends CustomEditor {
 		if ((matchesKey(data, "shift+e") || matchesKey(data, "shift+w") || printable === "E" || printable === "W") && !this.pendingG) {
 			const motionCount = this.consumeCount();
 			const total = Math.max(1, this.pendingOperatorCount * motionCount);
-			this.withTrackedEdit(() => {
-				this.send(SEQ.deleteWordForward, total);
+			this.captureDeleteToClipboard("charwise", () => {
+				this.withTrackedEdit(() => {
+					this.send(SEQ.deleteWordForward, total);
+				});
+				this.resetPending();
 			});
-			this.resetPending();
 			return;
 		}
 		if (this.tryStartFindFromInput(data)) {
@@ -1149,7 +1196,9 @@ class ModalEditor extends CustomEditor {
 			case "d": {
 				const motionCount = this.consumeCount();
 				const totalLines = Math.max(1, this.pendingOperatorCount * motionCount);
-				this.deleteCurrentLine(totalLines);
+				this.captureDeleteToClipboard("linewise", () => {
+					this.deleteCurrentLine(totalLines);
+				});
 				return;
 			}
 			case "w":
@@ -1157,25 +1206,31 @@ class ModalEditor extends CustomEditor {
 			case "W": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
-				this.withTrackedEdit(() => {
-					this.send(SEQ.deleteWordForward, total);
+				this.captureDeleteToClipboard("charwise", () => {
+					this.withTrackedEdit(() => {
+						this.send(SEQ.deleteWordForward, total);
+					});
+					this.resetPending();
 				});
-				this.resetPending();
 				return;
 			}
 			case "b": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
-				this.withTrackedEdit(() => {
-					this.send(SEQ.deleteWordBackward, total);
+				this.captureDeleteToClipboard("charwise", () => {
+					this.withTrackedEdit(() => {
+						this.send(SEQ.deleteWordBackward, total);
+					});
+					this.resetPending();
 				});
-				this.resetPending();
 				return;
 			}
 			case "B": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
-				this.deleteBigWordBackward(total);
+				this.captureDeleteToClipboard("charwise", () => {
+					this.deleteBigWordBackward(total);
+				});
 				return;
 			}
 			case ";":
@@ -1188,48 +1243,64 @@ class ModalEditor extends CustomEditor {
 				this.pendingG = true;
 				return;
 			case "%":
-				this.deleteToMatchingPair();
+				this.captureDeleteToClipboard("charwise", () => {
+					this.deleteToMatchingPair();
+				});
 				return;
 			case "l": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
-				this.withTrackedEdit(() => {
-					this.send(SEQ.deleteCharForward, total);
+				this.captureDeleteToClipboard("charwise", () => {
+					this.withTrackedEdit(() => {
+						this.send(SEQ.deleteCharForward, total);
+					});
+					this.resetPending();
 				});
-				this.resetPending();
 				return;
 			}
 			case "G":
-				this.deleteLinesThroughAbsoluteLine("last");
+				this.captureDeleteToClipboard("linewise", () => {
+					this.deleteLinesThroughAbsoluteLine("last");
+				});
 				return;
 			case "h": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
-				this.deleteCharsBackward(total);
+				this.captureDeleteToClipboard("charwise", () => {
+					this.deleteCharsBackward(total);
+				});
 				return;
 			}
 			case "$": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
-				this.deleteToLineEnd(total);
+				this.captureDeleteToClipboard("charwise", () => {
+					this.deleteToLineEnd(total);
+				});
 				return;
 			}
 			case "0": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
-				this.deleteToLineStart(total);
+				this.captureDeleteToClipboard("charwise", () => {
+					this.deleteToLineStart(total);
+				});
 				return;
 			}
 			case "j": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
-				this.deleteLinesDown(total);
+				this.captureDeleteToClipboard("linewise", () => {
+					this.deleteLinesDown(total);
+				});
 				return;
 			}
 			case "k": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
-				this.deleteLinesUp(total);
+				this.captureDeleteToClipboard("linewise", () => {
+					this.deleteLinesUp(total);
+				});
 				return;
 			}
 			default:
@@ -1273,18 +1344,24 @@ class ModalEditor extends CustomEditor {
 	private handlePendingGDeleteMotion(command: string): void {
 		switch (command) {
 			case "g":
-				this.deleteLinesThroughAbsoluteLine("first");
+				this.captureDeleteToClipboard("linewise", () => {
+					this.deleteLinesThroughAbsoluteLine("first");
+				});
 				return;
 			case "e": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
-				this.deleteToWordEndBackward(total, false);
+				this.captureDeleteToClipboard("charwise", () => {
+					this.deleteToWordEndBackward(total, false);
+				});
 				return;
 			}
 			case "E": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
-				this.deleteToWordEndBackward(total, true);
+				this.captureDeleteToClipboard("charwise", () => {
+					this.deleteToWordEndBackward(total, true);
+				});
 				return;
 			}
 			default:
@@ -1459,16 +1536,20 @@ class ModalEditor extends CustomEditor {
 			if (isBackward) {
 				const targetStart = findType === "F" ? foundIndex : Math.min(col, foundIndex + 1);
 				const deleteEnd = col + (col < currentLine.length ? 1 : 0);
-				this.deleteRangeInCurrentLine(targetStart, deleteEnd);
+				this.captureDeleteToClipboard("charwise", () => {
+					this.deleteRangeInCurrentLine(targetStart, deleteEnd);
+				});
 				return;
 			}
 
 			const totalDeletesForMotion =
 				findType === "f" ? Math.max(0, foundIndex - col + 1) : Math.max(0, foundIndex - col);
-			this.withTrackedEdit(() => {
-				this.send(SEQ.deleteCharForward, totalDeletesForMotion);
+			this.captureDeleteToClipboard("charwise", () => {
+				this.withTrackedEdit(() => {
+					this.send(SEQ.deleteCharForward, totalDeletesForMotion);
+				});
+				this.resetPending();
 			});
-			this.resetPending();
 			return;
 		}
 
@@ -1668,6 +1749,30 @@ class ModalEditor extends CustomEditor {
 		const targetLine = this.getAbsoluteLineTarget(defaultLine);
 		const targetCol = this.getFirstNonBlankCol(lines[targetLine] ?? "");
 		this.moveCursorTo({ line: targetLine, col: targetCol });
+		this.resetPending();
+	}
+
+	private replaceCharsAtCursor(char: string, count: number): void {
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+		const currentLine = lines[cursor.line] ?? "";
+		if (cursor.col >= currentLine.length) {
+			this.resetPending();
+			return;
+		}
+
+		const replaceCount = Math.max(1, count);
+		if (replaceCount > currentLine.length - cursor.col) {
+			this.resetPending();
+			return;
+		}
+
+		this.withTrackedEdit(() => {
+			const nextLines = this.getLines();
+			const line = nextLines[cursor.line] ?? "";
+			nextLines[cursor.line] = `${line.slice(0, cursor.col)}${char.repeat(replaceCount)}${line.slice(cursor.col + replaceCount)}`;
+			this.setTextAndMoveCursor(nextLines.join("\n"), { line: cursor.line, col: cursor.col + replaceCount - 1 });
+		});
 		this.resetPending();
 	}
 
@@ -2716,6 +2821,7 @@ class ModalEditor extends CustomEditor {
 			this.pendingOperator !== null ||
 			this.pendingFind !== null ||
 			this.pendingG ||
+			this.pendingReplace ||
 			this.pendingTextObjectPrefix !== null
 		);
 	}
@@ -2735,6 +2841,7 @@ class ModalEditor extends CustomEditor {
 		this.pendingOperatorCount = 1;
 		this.pendingFind = null;
 		this.pendingG = false;
+		this.pendingReplace = false;
 		this.pendingTextObjectPrefix = null;
 	}
 
@@ -2771,7 +2878,7 @@ class ModalEditor extends CustomEditor {
 		}
 
 		if (this.mode !== "insert") {
-			const pending = `${this.pendingOperator ?? ""}${this.pendingG ? "g" : ""}${this.pendingFind ?? ""}${this.pendingTextObjectPrefix ?? ""}${this.pendingCount}`;
+			const pending = `${this.pendingOperator ?? ""}${this.pendingG ? "g" : ""}${this.pendingFind ?? ""}${this.pendingTextObjectPrefix ?? ""}${this.pendingCount}${this.pendingReplace ? "r" : ""}`;
 			if (pending.length > 0) {
 				label = `${label.slice(0, -1)} [${pending}] `;
 			}

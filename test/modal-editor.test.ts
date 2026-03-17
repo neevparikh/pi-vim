@@ -103,6 +103,13 @@ function deleteLineRange(text: string, startLine: number, endLine: number): stri
 	return remaining.join("\n");
 }
 
+function getLastOsc52ClipboardText(writes: string[]): string {
+	const lastWrite = writes[writes.length - 1] ?? "";
+	const match = lastWrite.match(/^\u001b\]52;[^;]*;([A-Za-z0-9+/=]+)\u0007$/);
+	assert.ok(match, "expected an OSC52 clipboard write");
+	return Buffer.from(match[1] ?? "", "base64").toString("utf8");
+}
+
 describe("modal-editor extension motions", () => {
 	let editor: TestEditor;
 	let originalWrite: typeof process.stdout.write;
@@ -476,6 +483,62 @@ describe("modal-editor extension motions", () => {
 		editor.setText("abcdef");
 		press(editor, "\x1b", "0", "3", "l", "4", "x");
 		assert.equal(editor.getText(), "abc");
+	});
+
+	it("supports single-character replace with r<char>", () => {
+		editor.setText("abcdef");
+		press(editor, "\x1b", "0", "2", "l", "r", "X");
+		assert.equal(editor.getText(), "abXdef");
+		assert.deepEqual(editor.getCursor(), { line: 0, col: 2 });
+
+		press(editor, "u");
+		assert.equal(editor.getText(), "abcdef");
+
+		press(editor, "U");
+		assert.equal(editor.getText(), "abXdef");
+
+		editor.setText("abcdef");
+		press(editor, "0", "2", "l", "3", "r", "X");
+		assert.equal(editor.getText(), "abXXXf");
+		assert.deepEqual(editor.getCursor(), { line: 0, col: 4 });
+
+		editor.setText("abcdef");
+		press(editor, "0", "1", "0", "r", "X");
+		assert.equal(editor.getText(), "abcdef");
+
+		editor.setText("abcdef");
+		press(editor, "0", "r", "5");
+		assert.equal(editor.getText(), "5bcdef");
+
+		editor.setText("");
+		press(editor, "0", "r", "X");
+		assert.equal(editor.getText(), "");
+
+		editor.setText("abc\ndef");
+		press(editor, "9", "k", "0", "2", "l", "r", "X");
+		assert.equal(editor.getText(), "abX\ndef");
+
+		editor.setText("abcdef");
+		press(editor, "0", "$", "r", "X");
+		assert.equal(editor.getText(), "abcdef");
+
+		editor.setText("abcdef");
+		press(editor, "0", "3", "r", "\x1b");
+		assert.equal(editor.getText(), "abcdef");
+	});
+
+	it("copies deleted text to the clipboard for x and delete motions", () => {
+		editor.setText("abcdef");
+		press(editor, "\x1b", "0", "2", "l", "x");
+		assert.equal(getLastOsc52ClipboardText(clipboardOsc52Writes), "c");
+
+		editor.setText("alpha beta");
+		press(editor, "\x1b", "0", "d", "w");
+		assert.equal(getLastOsc52ClipboardText(clipboardOsc52Writes), "alpha");
+
+		editor.setText("a\nb\nc");
+		press(editor, "\x1b", "9", "k", "0", "d", "j");
+		assert.equal(getLastOsc52ClipboardText(clipboardOsc52Writes), "a\nb");
 	});
 
 	it("handles Shift+E in visual mode", () => {
