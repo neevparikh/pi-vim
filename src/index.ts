@@ -271,7 +271,7 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 		if ((matchesKey(data, "shift+e") || printable === "E") && !this.pendingG) {
-			this.send(SEQ.wordForward, this.consumeCount());
+			this.moveWordEndForward(this.consumeCount(), true);
 			return;
 		}
 		if (this.isOpenBraceInput(data)) {
@@ -313,19 +313,19 @@ class ModalEditor extends CustomEditor {
 				this.resetPending();
 				return;
 			case "w":
-				this.send(SEQ.wordForward, this.consumeCount());
+				this.moveSmallWordForward(this.consumeCount());
 				return;
 			case "W":
 				this.moveBigWordForward(this.consumeCount());
 				return;
 			case "b":
-				this.send(SEQ.wordBackward, this.consumeCount());
+				this.moveSmallWordBackward(this.consumeCount());
 				return;
 			case "B":
 				this.moveBigWordBackward(this.consumeCount());
 				return;
 			case "e":
-				this.send(SEQ.wordForward, this.consumeCount());
+				this.moveWordEndForward(this.consumeCount(), false);
 				return;
 			case "%":
 				this.moveToMatchingPair();
@@ -361,6 +361,15 @@ class ModalEditor extends CustomEditor {
 			case "r":
 				this.pendingReplace = true;
 				return;
+			case "^":
+				this.moveToFirstNonBlank();
+				return;
+			case "~":
+				this.toggleCaseAtCursor(this.consumeCount());
+				return;
+			case "s":
+				this.substituteChars(this.consumeCount());
+				return;
 			case "d":
 				this.pendingOperator = "d";
 				this.pendingOperatorCount = this.consumeCount();
@@ -385,6 +394,15 @@ class ModalEditor extends CustomEditor {
 				this.captureDeleteToClipboard("charwise", () => {
 					this.deleteToLineEnd(this.consumeCount());
 				});
+				return;
+			case "C":
+				this.captureDeleteToClipboard("charwise", () => {
+					this.deleteToLineEnd(this.consumeCount());
+				});
+				this.mode = "insert";
+				return;
+			case "S":
+				this.substituteLines(this.consumeCount());
 				return;
 			case "v":
 				this.mode = "visual";
@@ -454,7 +472,7 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 		if ((matchesKey(data, "shift+e") || printable === "E") && !this.pendingG) {
-			this.send(SEQ.wordForward, this.consumeCount());
+			this.moveWordEndForward(this.consumeCount(), true);
 			return;
 		}
 		if (this.isOpenBraceInput(data)) {
@@ -499,9 +517,22 @@ class ModalEditor extends CustomEditor {
 				this.resetPending();
 				return;
 			case "d":
+			case "x":
 				this.captureDeleteToClipboard(this.mode === "visual_line" ? "linewise" : "charwise", () => {
 					this.deleteVisualSelection();
 				});
+				return;
+			case "c":
+				if (this.mode === "visual_line") {
+					this.captureDeleteToClipboard("linewise", () => {
+						this.changeVisualLineSelection();
+					});
+				} else {
+					this.captureDeleteToClipboard("charwise", () => {
+						this.deleteVisualSelection();
+					});
+				}
+				this.mode = "insert";
 				return;
 			case "o": {
 				const current = this.getCursor();
@@ -532,19 +563,19 @@ class ModalEditor extends CustomEditor {
 				this.resetPending();
 				return;
 			case "w":
-				this.send(SEQ.wordForward, this.consumeCount());
+				this.moveSmallWordForward(this.consumeCount());
 				return;
 			case "W":
 				this.moveBigWordForward(this.consumeCount());
 				return;
 			case "b":
-				this.send(SEQ.wordBackward, this.consumeCount());
+				this.moveSmallWordBackward(this.consumeCount());
 				return;
 			case "B":
 				this.moveBigWordBackward(this.consumeCount());
 				return;
 			case "e":
-				this.send(SEQ.wordForward, this.consumeCount());
+				this.moveWordEndForward(this.consumeCount(), false);
 				return;
 			case "%":
 				this.moveToMatchingPair();
@@ -946,6 +977,19 @@ class ModalEditor extends CustomEditor {
 	private mapOperatorCommandToDeleteMotion(data: string, operator: PendingOperator): string {
 		const command = this.normalizeCommandInput(data);
 		if (operator === "c" && command === "c") return "d";
+		// vim special case: cw/cW act like ce/cE when cursor is on a non-blank
+		if (operator === "c" && command === "w") {
+			const cursor = this.getCursor();
+			const line = this.getLines()[cursor.line] ?? "";
+			const ch = line[cursor.col] ?? "";
+			if (ch && !isWhitespaceChar(ch)) return "e";
+		}
+		if (operator === "c" && command === "W") {
+			const cursor = this.getCursor();
+			const line = this.getLines()[cursor.line] ?? "";
+			const ch = line[cursor.col] ?? "";
+			if (ch && !isWhitespaceChar(ch)) return "E";
+		}
 		if (operator === "y" && command === "y") return "d";
 		if (operator === "g~" && command === "~") return "d";
 		if (operator === "gu" && command === "u") return "d";
@@ -1049,6 +1093,28 @@ class ModalEditor extends CustomEditor {
 	}
 
 	private handleChangeOperator(data: string): void {
+		// vim special case: cc clears line content but keeps the line
+		const command = this.normalizeCommandInput(data);
+		if (command === "c") {
+			const motionCount = this.consumeCount();
+			const total = Math.max(1, this.pendingOperatorCount * motionCount);
+			const cursor = this.getCursor();
+			const lines = this.getLines();
+			const startLine = cursor.line;
+			const endLine = Math.min(lines.length - 1, startLine + total - 1);
+			const deletedLines = lines.slice(startLine, endLine + 1).join("\n");
+			this.writeClipboard(deletedLines, "linewise");
+			this.withTrackedEdit(() => {
+				const nextLines = this.getLines();
+				nextLines.splice(startLine, endLine - startLine + 1, "");
+				if (nextLines.length === 0) nextLines.push("");
+				this.setTextAndMoveCursor(nextLines.join("\n"), { line: startLine, col: 0 });
+			});
+			this.mode = "insert";
+			this.resetPending();
+			return;
+		}
+
 		const result = this.runDeleteProxy(data, "c");
 		if (result.status === "pending") {
 			return;
@@ -1171,14 +1237,19 @@ class ModalEditor extends CustomEditor {
 
 	private handleDeleteOperator(data: string): void {
 		const printable = this.getPrintableInputChar(data);
-		if ((matchesKey(data, "shift+e") || matchesKey(data, "shift+w") || printable === "E" || printable === "W") && !this.pendingG) {
+		if ((matchesKey(data, "shift+w") || printable === "W") && !this.pendingG) {
 			const motionCount = this.consumeCount();
 			const total = Math.max(1, this.pendingOperatorCount * motionCount);
 			this.captureDeleteToClipboard("charwise", () => {
-				this.withTrackedEdit(() => {
-					this.send(SEQ.deleteWordForward, total);
-				});
-				this.resetPending();
+				this.deleteToWordStartForward(total, true);
+			});
+			return;
+		}
+		if ((matchesKey(data, "shift+e") || printable === "E") && !this.pendingG) {
+			const motionCount = this.consumeCount();
+			const total = Math.max(1, this.pendingOperatorCount * motionCount);
+			this.captureDeleteToClipboard("charwise", () => {
+				this.deleteToWordEndForward(total, true);
 			});
 			return;
 		}
@@ -1201,16 +1272,27 @@ class ModalEditor extends CustomEditor {
 				});
 				return;
 			}
-			case "w":
-			case "e":
+			case "w": {
+				const motionCount = this.consumeCount();
+				const total = Math.max(1, this.pendingOperatorCount * motionCount);
+				this.captureDeleteToClipboard("charwise", () => {
+					this.deleteToWordStartForward(total, false);
+				});
+				return;
+			}
 			case "W": {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
 				this.captureDeleteToClipboard("charwise", () => {
-					this.withTrackedEdit(() => {
-						this.send(SEQ.deleteWordForward, total);
-					});
-					this.resetPending();
+					this.deleteToWordStartForward(total, true);
+				});
+				return;
+			}
+			case "e": {
+				const motionCount = this.consumeCount();
+				const total = Math.max(1, this.pendingOperatorCount * motionCount);
+				this.captureDeleteToClipboard("charwise", () => {
+					this.deleteToWordEndForward(total, false);
 				});
 				return;
 			}
@@ -1218,10 +1300,7 @@ class ModalEditor extends CustomEditor {
 				const motionCount = this.consumeCount();
 				const total = Math.max(1, this.pendingOperatorCount * motionCount);
 				this.captureDeleteToClipboard("charwise", () => {
-					this.withTrackedEdit(() => {
-						this.send(SEQ.deleteWordBackward, total);
-					});
-					this.resetPending();
+					this.deleteToSmallWordStartBackward(total);
 				});
 				return;
 			}
@@ -1404,6 +1483,7 @@ class ModalEditor extends CustomEditor {
 		if (parsed === "shift+]") return "}";
 
 		if (matchesKey(data, "shift+b")) return "B";
+		if (matchesKey(data, "shift+c")) return "C";
 		if (matchesKey(data, "shift+d")) return "D";
 		if (matchesKey(data, "shift+i")) return "I";
 		if (matchesKey(data, "shift+a")) return "A";
@@ -1411,7 +1491,10 @@ class ModalEditor extends CustomEditor {
 		if (matchesKey(data, "shift+j")) return "J";
 		if (matchesKey(data, "shift+e")) return "E";
 		if (matchesKey(data, "shift+g")) return "G";
+		if (matchesKey(data, "shift+s")) return "S";
 		if (matchesKey(data, "shift+w")) return "W";
+		if (matchesKey(data, "shift+6")) return "^";
+		if (matchesKey(data, "^")) return "^";
 
 		const printable = this.getPrintableInputChar(data);
 		if (printable !== null) {
@@ -1583,6 +1666,28 @@ class ModalEditor extends CustomEditor {
 		this.applyFind(this.lastFindCommand.targetChar, findType, false);
 	}
 
+	private moveSmallWordForward(count: number): void {
+		const repeats = Math.max(1, count);
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+		const fullText = lines.join("\n");
+		const fromIndex = this.posToIndex(lines, cursor);
+		const targetIndex = this.findSmallWordStartForward(fullText, fromIndex, repeats);
+		this.moveCursorTo(this.indexToPos(fullText, targetIndex));
+		this.resetPending();
+	}
+
+	private moveSmallWordBackward(count: number): void {
+		const repeats = Math.max(1, count);
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+		const fullText = lines.join("\n");
+		const fromIndex = this.posToIndex(lines, cursor);
+		const targetIndex = this.findSmallWordStartBackward(fullText, fromIndex, repeats);
+		this.moveCursorTo(this.indexToPos(fullText, targetIndex));
+		this.resetPending();
+	}
+
 	private moveBigWordForward(count: number): void {
 		const repeats = Math.max(1, count);
 		const cursor = this.getCursor();
@@ -1613,6 +1718,80 @@ class ModalEditor extends CustomEditor {
 		const fromIndex = this.posToIndex(lines, cursor);
 		const targetIndex = this.findWordEndBackward(fullText, fromIndex, repeats, bigWord);
 		this.moveCursorTo(this.indexToPos(fullText, targetIndex));
+		this.resetPending();
+	}
+
+	private deleteToWordStartForward(count: number, bigWord: boolean): void {
+		const repeats = Math.max(1, count);
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+		const fullText = lines.join("\n");
+		const cursorIndex = this.posToIndex(lines, cursor);
+		const targetIndex = bigWord
+			? this.findBigWordStartForward(fullText, cursorIndex, repeats)
+			: this.findSmallWordStartForward(fullText, cursorIndex, repeats);
+		const deleteStart = cursorIndex;
+		let deleteEnd = Math.min(fullText.length, targetIndex);
+
+		// vim special case: dw/dW should not cross a newline boundary
+		const newlineIndex = fullText.indexOf("\n", cursorIndex);
+		if (newlineIndex >= 0 && newlineIndex < deleteEnd) {
+			deleteEnd = newlineIndex;
+		}
+
+		if (deleteStart >= deleteEnd) {
+			this.resetPending();
+			return;
+		}
+
+		this.withTrackedEdit(() => {
+			const nextText = fullText.slice(0, deleteStart) + fullText.slice(deleteEnd);
+			this.setTextAndMoveCursor(nextText, this.indexToPos(nextText, deleteStart));
+		});
+		this.resetPending();
+	}
+
+	private deleteToSmallWordStartBackward(count: number): void {
+		const repeats = Math.max(1, count);
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+		const fullText = lines.join("\n");
+		const cursorIndex = this.posToIndex(lines, cursor);
+		const targetIndex = this.findSmallWordStartBackward(fullText, cursorIndex, repeats);
+		const deleteStart = targetIndex;
+		const deleteEnd = cursorIndex;
+
+		if (deleteStart >= deleteEnd) {
+			this.resetPending();
+			return;
+		}
+
+		this.withTrackedEdit(() => {
+			const nextText = fullText.slice(0, deleteStart) + fullText.slice(deleteEnd);
+			this.setTextAndMoveCursor(nextText, this.indexToPos(nextText, deleteStart));
+		});
+		this.resetPending();
+	}
+
+	private deleteToWordEndForward(count: number, bigWord: boolean): void {
+		const repeats = Math.max(1, count);
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+		const fullText = lines.join("\n");
+		const cursorIndex = this.posToIndex(lines, cursor);
+		const targetIndex = this.findWordEndForward(fullText, cursorIndex, repeats, bigWord);
+		const deleteStart = cursorIndex;
+		const deleteEnd = Math.min(fullText.length, targetIndex + 1);
+
+		if (deleteStart >= deleteEnd) {
+			this.resetPending();
+			return;
+		}
+
+		this.withTrackedEdit(() => {
+			const nextText = fullText.slice(0, deleteStart) + fullText.slice(deleteEnd);
+			this.setTextAndMoveCursor(nextText, this.indexToPos(nextText, deleteStart));
+		});
 		this.resetPending();
 	}
 
@@ -1688,16 +1867,15 @@ class ModalEditor extends CustomEditor {
 
 		for (let step = 0; step < repeats; step++) {
 			let probe = targetLine + 1;
+			// Skip non-blank lines to find the next blank line
 			while (probe < lines.length && !this.isBlankLine(lines[probe] ?? "")) {
-				probe += 1;
-			}
-			while (probe < lines.length && this.isBlankLine(lines[probe] ?? "")) {
 				probe += 1;
 			}
 			if (probe >= lines.length) {
 				targetLine = Math.max(0, lines.length - 1);
 				break;
 			}
+			// Land ON the blank line (vim behavior)
 			targetLine = probe;
 		}
 
@@ -1712,17 +1890,16 @@ class ModalEditor extends CustomEditor {
 
 		for (let step = 0; step < repeats; step++) {
 			let probe = targetLine - 1;
-			while (probe >= 0 && this.isBlankLine(lines[probe] ?? "")) {
+			// Skip non-blank lines to find the previous blank line
+			while (probe >= 0 && !this.isBlankLine(lines[probe] ?? "")) {
 				probe -= 1;
 			}
 			if (probe < 0) {
 				targetLine = 0;
 				break;
 			}
-			while (probe >= 0 && !this.isBlankLine(lines[probe] ?? "")) {
-				probe -= 1;
-			}
-			targetLine = Math.max(0, probe + 1);
+			// Land ON the blank line (vim behavior)
+			targetLine = probe;
 		}
 
 		this.moveCursorTo({ line: targetLine, col: 0 });
@@ -1848,6 +2025,99 @@ class ModalEditor extends CustomEditor {
 		return index;
 	}
 
+	private findSmallWordStartForward(text: string, fromIndex: number, repeats: number): number {
+		let index = Math.max(0, Math.min(fromIndex, text.length));
+		const steps = Math.max(1, repeats);
+
+		for (let step = 0; step < steps; step++) {
+			if (index >= text.length) {
+				return text.length;
+			}
+
+			const ch = text[index] ?? "";
+			if (isWhitespaceChar(ch)) {
+				while (index < text.length && isWhitespaceChar(text[index] ?? "")) {
+					index += 1;
+				}
+			} else {
+				const cls = getSmallWordClass(ch);
+				while (index < text.length && getSmallWordClass(text[index] ?? "") === cls) {
+					index += 1;
+				}
+				while (index < text.length && isWhitespaceChar(text[index] ?? "")) {
+					index += 1;
+				}
+			}
+		}
+
+		return index;
+	}
+
+	private findSmallWordStartBackward(text: string, fromIndex: number, repeats: number): number {
+		let index = Math.max(0, Math.min(fromIndex, text.length));
+		const steps = Math.max(1, repeats);
+
+		for (let step = 0; step < steps; step++) {
+			if (index <= 0) {
+				return 0;
+			}
+
+			index -= 1;
+			while (index >= 0 && isWhitespaceChar(text[index] ?? "")) {
+				index -= 1;
+			}
+			if (index < 0) {
+				return 0;
+			}
+
+			const cls = getSmallWordClass(text[index] ?? "");
+			while (index > 0 && getSmallWordClass(text[index - 1] ?? "") === cls) {
+				index -= 1;
+			}
+		}
+
+		return index;
+	}
+
+	private findWordEndForward(text: string, fromIndex: number, repeats: number, bigWord: boolean): number {
+		if (text.length === 0) {
+			return 0;
+		}
+
+		let probe = Math.max(0, Math.min(fromIndex, text.length - 1));
+		const steps = Math.max(1, repeats);
+
+		for (let step = 0; step < steps; step++) {
+			// Move off current position first (vim e always advances at least one char)
+			probe += 1;
+			if (probe >= text.length) {
+				return text.length - 1;
+			}
+
+			// Skip whitespace
+			while (probe < text.length && isWhitespaceChar(text[probe] ?? "")) {
+				probe += 1;
+			}
+			if (probe >= text.length) {
+				return text.length - 1;
+			}
+
+			// Advance to end of current word
+			if (bigWord) {
+				while (probe + 1 < text.length && !isWhitespaceChar(text[probe + 1] ?? "")) {
+					probe += 1;
+				}
+			} else {
+				const cls = getSmallWordClass(text[probe] ?? "");
+				while (probe + 1 < text.length && getSmallWordClass(text[probe + 1] ?? "") === cls) {
+					probe += 1;
+				}
+			}
+		}
+
+		return Math.min(probe, text.length - 1);
+	}
+
 	private findWordEndBackward(text: string, fromIndex: number, repeats: number, bigWord: boolean): number {
 		if (text.length === 0) {
 			return 0;
@@ -1910,9 +2180,18 @@ class ModalEditor extends CustomEditor {
 		let index = Math.max(0, Math.min(fromIndex, text.length - 1));
 		let ch = text[index] ?? "";
 
-		if (!openingToClosing[ch] && !closingToOpening[ch] && index > 0) {
-			index -= 1;
-			ch = text[index] ?? "";
+		// vim %: if not on a bracket, scan forward on current line to find one
+		if (!openingToClosing[ch] && !closingToOpening[ch]) {
+			const lineEnd = text.indexOf("\n", index);
+			const end = lineEnd < 0 ? text.length : lineEnd;
+			for (let scan = index + 1; scan < end; scan++) {
+				const sc = text[scan] ?? "";
+				if (openingToClosing[sc] || closingToOpening[sc]) {
+					index = scan;
+					ch = sc;
+					break;
+				}
+			}
 		}
 
 		if (openingToClosing[ch]) {
@@ -1955,6 +2234,17 @@ class ModalEditor extends CustomEditor {
 		const fullText = lines.join("\n");
 		const fromIndex = this.posToIndex(lines, cursor);
 		const targetIndex = this.findBigWordStartBackward(fullText, fromIndex, repeats);
+		this.moveCursorTo(this.indexToPos(fullText, targetIndex));
+		this.resetPending();
+	}
+
+	private moveWordEndForward(count: number, bigWord: boolean): void {
+		const repeats = Math.max(1, count);
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+		const fullText = lines.join("\n");
+		const fromIndex = this.posToIndex(lines, cursor);
+		const targetIndex = this.findWordEndForward(fullText, fromIndex, repeats, bigWord);
 		this.moveCursorTo(this.indexToPos(fullText, targetIndex));
 		this.resetPending();
 	}
@@ -2105,6 +2395,72 @@ class ModalEditor extends CustomEditor {
 		this.resetPending();
 	}
 
+	private moveToLastCharOnLine(): void {
+		const cursor = this.getCursor();
+		const line = this.getLines()[cursor.line] ?? "";
+		const lastCol = Math.max(0, line.length - 1);
+		this.moveCursorTo({ line: cursor.line, col: lastCol });
+		this.resetPending();
+	}
+
+	private moveToFirstNonBlank(): void {
+		const { line } = this.getCursor();
+		const currentLine = this.getLines()[line] ?? "";
+		const firstNonBlank = this.getFirstNonBlankCol(currentLine);
+		this.moveCursorTo({ line, col: firstNonBlank });
+		this.resetPending();
+	}
+
+	private toggleCaseAtCursor(count: number): void {
+		const repeats = Math.max(1, count);
+		const cursor = this.getCursor();
+		const lines = this.getLines();
+		const currentLine = lines[cursor.line] ?? "";
+		if (currentLine.length === 0) {
+			this.resetPending();
+			return;
+		}
+		// Clamp cursor to last valid position ($ may place cursor past end)
+		const startCol = Math.min(cursor.col, currentLine.length - 1);
+		const end = Math.min(startCol + repeats, currentLine.length);
+		const segment = currentLine.slice(startCol, end);
+		const toggled = this.transformCase(segment, "toggle");
+		this.withTrackedEdit(() => {
+			const nextLines = this.getLines();
+			const line = nextLines[cursor.line] ?? "";
+			nextLines[cursor.line] = `${line.slice(0, startCol)}${toggled}${line.slice(end)}`;
+			this.setTextAndMoveCursor(nextLines.join("\n"), { line: cursor.line, col: Math.min(end, currentLine.length - 1) });
+		});
+		this.resetPending();
+	}
+
+	private substituteChars(count: number): void {
+		const repeats = Math.max(1, count);
+		this.captureDeleteToClipboard("charwise", () => {
+			this.withTrackedEdit(() => {
+				this.send(SEQ.deleteCharForward, repeats);
+			});
+		});
+		this.mode = "insert";
+		this.resetPending();
+	}
+
+	private substituteLines(count: number): void {
+		const repeats = Math.max(1, count);
+		this.captureDeleteToClipboard("linewise", () => {
+			this.withTrackedEdit(() => {
+				const cursor = this.getCursor();
+				const lines = this.getLines();
+				const endLine = Math.min(lines.length, cursor.line + repeats);
+				const remaining = [...lines.slice(0, cursor.line), "", ...lines.slice(endLine)];
+				if (remaining.length === 0) remaining.push("");
+				this.setTextAndMoveCursor(remaining.join("\n"), { line: cursor.line, col: 0 });
+			});
+		});
+		this.mode = "insert";
+		this.resetPending();
+	}
+
 	private enterInsertAtFirstNonBlank(): void {
 		const { line } = this.getCursor();
 		const currentLine = this.getLines()[line] ?? "";
@@ -2157,14 +2513,15 @@ class ModalEditor extends CustomEditor {
 
 				const currentLine = lines[cursor.line] ?? "";
 				const nextLine = lines[cursor.line + 1] ?? "";
+				const trimmedNext = nextLine.replace(/^\s+/, "");
 				const shouldInsertSpace =
-					currentLine.length > 0 && nextLine.length > 0 && !/\s$/.test(currentLine) && !/^\s/.test(nextLine);
+					currentLine.length > 0 && trimmedNext.length > 0 && !/\s$/.test(currentLine);
+				const joinCol = currentLine.length;
 
-				this.send(SEQ.lineEnd);
-				this.send(SEQ.deleteToEnd);
-				if (shouldInsertSpace) {
-					super.handleInput(" ");
-				}
+				// Replace current line + next line with joined version
+				const joined = shouldInsertSpace ? `${currentLine} ${trimmedNext}` : `${currentLine}${trimmedNext}`;
+				lines.splice(cursor.line, 2, joined);
+				this.setTextAndMoveCursor(lines.join("\n"), { line: cursor.line, col: joinCol });
 			}
 		});
 		this.resetPending();
@@ -2179,6 +2536,25 @@ class ModalEditor extends CustomEditor {
 			startLine: Math.min(this.visualAnchor.line, cursor.line),
 			endLine: Math.max(this.visualAnchor.line, cursor.line),
 		};
+	}
+
+	private changeVisualLineSelection(): void {
+		const range = this.getVisualLineRange();
+		if (!range) {
+			this.mode = "normal";
+			this.visualAnchor = null;
+			this.resetPending();
+			return;
+		}
+		this.withTrackedEdit(() => {
+			const lines = this.getLines();
+			const nextLines = [...lines.slice(0, range.startLine), "", ...lines.slice(range.endLine + 1)];
+			if (nextLines.length === 0) nextLines.push("");
+			this.setTextAndMoveCursor(nextLines.join("\n"), { line: range.startLine, col: 0 });
+		});
+		this.mode = "normal";
+		this.visualAnchor = null;
+		this.resetPending();
 	}
 
 	private deleteVisualSelection(): void {

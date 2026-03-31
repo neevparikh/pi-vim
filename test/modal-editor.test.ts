@@ -154,19 +154,19 @@ describe("modal-editor extension motions", () => {
 		press(editor, "\x1b", "0");
 
 		press(editor, "w");
-		assert.equal(editor.getCursor().col, 5);
+		assert.equal(editor.getCursor().col, 6);
 
 		press(editor, "w");
-		assert.equal(editor.getCursor().col, 10);
+		assert.equal(editor.getCursor().col, 11);
 
 		press(editor, "b");
 		assert.equal(editor.getCursor().col, 6);
 
 		press(editor, "e");
-		assert.equal(editor.getCursor().col, 10);
+		assert.equal(editor.getCursor().col, 9);
 
 		press(editor, "E");
-		assert.equal(editor.getCursor().col, 16);
+		assert.equal(editor.getCursor().col, 15);
 
 		press(editor, "0", "f", "g");
 		assert.equal(editor.getCursor().col, 11);
@@ -252,13 +252,13 @@ describe("modal-editor extension motions", () => {
 
 		editor.setText("one\ntwo\n\nthree\nfour\n\nfive");
 		press(editor, "9", "k", "0", "}");
-		assert.deepEqual(editor.getCursor(), { line: 3, col: 0 });
+		assert.deepEqual(editor.getCursor(), { line: 2, col: 0 });
 		press(editor, "}");
-		assert.deepEqual(editor.getCursor(), { line: 6, col: 0 });
+		assert.deepEqual(editor.getCursor(), { line: 5, col: 0 });
 
 		editor.setText("one\ntwo\n\nthree\nfour\n\nfive");
 		press(editor, "9", "k", "0", "}", "j", "{");
-		assert.deepEqual(editor.getCursor(), { line: 3, col: 0 });
+		assert.deepEqual(editor.getCursor(), { line: 2, col: 0 });
 	});
 
 	it("supports absolute line motions gg and G", () => {
@@ -433,7 +433,7 @@ describe("modal-editor extension motions", () => {
 
 		editor.setText("alpha beta gamma");
 		press(editor, "\x1b", "9", "k", "0", "\x1b[69;2u");
-		assert.equal(editor.getCursor().col, 5);
+		assert.equal(editor.getCursor().col, 4);
 	});
 
 	it("supports uppercase normal-mode commands from Kitty shift sequences", () => {
@@ -534,7 +534,7 @@ describe("modal-editor extension motions", () => {
 
 		editor.setText("alpha beta");
 		press(editor, "\x1b", "0", "d", "w");
-		assert.equal(getLastOsc52ClipboardText(clipboardOsc52Writes), "alpha");
+		assert.equal(getLastOsc52ClipboardText(clipboardOsc52Writes), "alpha ");
 
 		editor.setText("a\nb\nc");
 		press(editor, "\x1b", "9", "k", "0", "d", "j");
@@ -712,7 +712,7 @@ describe("modal-editor extension motions", () => {
 
 		editor.setText("a\nb\nc");
 		press(editor, "9", "k", "0", "j", "c", "c", "X", "\x1b");
-		assert.equal(editor.getText(), "a\nXc");
+		assert.equal(editor.getText(), "a\nX\nc");
 
 		editor.setText("word next");
 		press(editor, "9", "k", "0", "c", "w", "X", "\x1b");
