@@ -143,10 +143,17 @@ describe("modal-editor extension motions", () => {
 		assert.deepEqual(editor.getCursor(), { line: 1, col: 2 });
 
 		press(editor, "$", "k");
-		assert.deepEqual(editor.getCursor(), { line: 0, col: 3 });
+		assert.deepEqual(editor.getCursor(), { line: 0, col: 2 });
 
 		press(editor, "j", "2", "h");
-		assert.deepEqual(editor.getCursor(), { line: 1, col: 1 });
+		assert.deepEqual(editor.getCursor(), { line: 1, col: 0 });
+
+		editor.setText("ab\ncd");
+		press(editor, "9", "k", "0", "l", "l");
+		assert.deepEqual(editor.getCursor(), { line: 0, col: 1 });
+
+		press(editor, "h", "h");
+		assert.deepEqual(editor.getCursor(), { line: 0, col: 0 });
 	});
 
 	it("supports word/find motions w, b/B, e, E, f/F<char>, t/T<char>", () => {
@@ -470,7 +477,7 @@ describe("modal-editor extension motions", () => {
 		press(editor, "\x1b");
 		editor.setText("foo/bar baz");
 		press(editor, "0", "$", "d", "\x1b[98;2u");
-		assert.equal(editor.getText(), "foo/bar ");
+		assert.equal(editor.getText(), "foo/bar z");
 	});
 
 	it("supports B across line boundaries", () => {
@@ -520,7 +527,7 @@ describe("modal-editor extension motions", () => {
 
 		editor.setText("abcdef");
 		press(editor, "0", "$", "r", "X");
-		assert.equal(editor.getText(), "abcdef");
+		assert.equal(editor.getText(), "abcdeX");
 
 		editor.setText("abcdef");
 		press(editor, "0", "3", "r", "\x1b");
@@ -577,6 +584,10 @@ describe("modal-editor extension motions", () => {
 		editor.setText("abcdef");
 		press(editor, "\x1b", "0", "v", "2", "l", "y", "$", "p");
 		assert.equal(editor.getText(), "abcdefabc");
+
+		editor.setText("abc\ndef");
+		press(editor, "9", "k", "0", "v", "$", "y", "p");
+		assert.equal(editor.getText(), "abcabc\ndef");
 	});
 
 	it("replaces visual selection when pasting in visual mode", () => {
@@ -656,7 +667,7 @@ describe("modal-editor extension motions", () => {
 
 		editor.setText("foo/bar baz");
 		press(editor, "\x1b", "0", "$", "d", "B");
-		assert.equal(editor.getText(), "foo/bar ");
+		assert.equal(editor.getText(), "foo/bar z");
 
 		editor.setText("foo/bar baz");
 		press(editor, "\x1b", "0", "9", "l", "d", "B");
@@ -664,7 +675,7 @@ describe("modal-editor extension motions", () => {
 
 		editor.setText("aa bb cc dd");
 		press(editor, "\x1b", "0", "$", "2", "d", "B");
-		assert.equal(editor.getText(), "aa bb ");
+		assert.equal(editor.getText(), "aa bb d");
 
 		editor.setText("xabc");
 		press(editor, "\x1b", "0", "d", "F", "x");
@@ -815,6 +826,20 @@ describe("modal-editor extension motions", () => {
 		const markerLine = lines.find((line) => line.includes(CURSOR_MARKER));
 		assert.ok(markerLine);
 		assert.ok(markerLine.indexOf(CURSOR_MARKER) > 0);
+	});
+
+	it("returns to the expected normal-mode cursor when leaving insert mode", () => {
+		assert.deepEqual(getCursorAfter("", "a", "b", "c", "\x1b"), { line: 0, col: 2 });
+		assert.deepEqual(getCursorAfter("abc", "\x1b", "0", "l", "i", "\x1b"), { line: 0, col: 1 });
+		assert.deepEqual(getCursorAfter("abc", "\x1b", "0", "l", "a", "\x1b"), { line: 0, col: 1 });
+		assert.deepEqual(getCursorAfter("abc", "\x1b", "0", "A", "\x1b"), { line: 0, col: 2 });
+	});
+
+	it("keeps undo cursor positions sensible after insert edits", () => {
+		editor.setText("");
+		press(editor, "a", "b", "c", "\x1b", "u");
+		assert.equal(editor.getText(), "ab");
+		assert.deepEqual(editor.getCursor(), { line: 0, col: 1 });
 	});
 
 	it("supports undo/redo with u and U", () => {

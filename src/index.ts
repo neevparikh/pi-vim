@@ -49,6 +49,7 @@ interface LastFindCommand {
 interface Snapshot {
 	text: string;
 	cursor: Pos;
+	normalCursor: Pos;
 }
 
 interface TextChunk {
@@ -153,12 +154,162 @@ class ModalEditor extends CustomEditor {
 	private redoHistory: Snapshot[] = [];
 	private trackingDepth = 0;
 	private trackingStartSnapshot: Snapshot | null = null;
+	private insertSessionStart: Pos | null = null;
+	private insertFallbackNormalCursor: Pos | null = null;
+	private insertSessionEdited = false;
+	private modalPreferredCol: number | null = null;
+
+	override setText(text: string): void {
+		super.setText(text);
+		if (this.mode === "insert") {
+			this.primeInsertSession(this.getNormalCursorFromInsertPos(this.getCursor()));
+		} else {
+			this.clearInsertSession();
+		}
+	}
+
+	private clonePos(pos: Pos): Pos {
+		return { line: pos.line, col: pos.col };
+	}
+
+	private samePos(a: Pos | null, b: Pos | null): boolean {
+		return a !== null && b !== null && a.line === b.line && a.col === b.col;
+	}
+
+	private clearInsertSession(): void {
+		this.insertSessionStart = null;
+		this.insertFallbackNormalCursor = null;
+		this.insertSessionEdited = false;
+	}
+
+	private clearModalPreferredCol(): void {
+		this.modalPreferredCol = null;
+	}
+
+	private getModalLineMaxCol(lineText: string): number {
+		if (this.mode === "insert") {
+			return lineText.length;
+		}
+		return lineText.length === 0 ? 0 : lineText.length - 1;
+	}
+
+	private clampModalPos(pos: Pos): Pos {
+		const lines = this.getLines();
+		const maxLine = Math.max(0, lines.length - 1);
+		const line = Math.max(0, Math.min(pos.line, maxLine));
+		const lineText = lines[line] ?? "";
+		const maxCol = this.getModalLineMaxCol(lineText);
+		return { line, col: Math.max(0, Math.min(pos.col, maxCol)) };
+	}
+
+	private getModalCursor(): Pos {
+		return this.clampModalPos(this.getCursor());
+	}
+
+	private moveToModalLineStart(): void {
+		const cursor = this.getModalCursor();
+		this.moveCursorTo({ line: cursor.line, col: 0 });
+		this.resetPending();
+	}
+
+	private moveHorizontally(count: number, direction: -1 | 1): void {
+		const repeats = Math.max(1, count);
+		const cursor = this.getModalCursor();
+		const lineText = this.getLines()[cursor.line] ?? "";
+		const maxCol = this.getModalLineMaxCol(lineText);
+		const targetCol = direction < 0 ? Math.max(0, cursor.col - repeats) : Math.min(maxCol, cursor.col + repeats);
+		this.moveCursorTo({ line: cursor.line, col: targetCol });
+		this.resetPending();
+	}
+
+	private moveVertically(count: number, direction: -1 | 1): void {
+		const repeats = Math.max(1, count);
+		const lines = this.getLines();
+		const cursor = this.getModalCursor();
+		const maxLine = Math.max(0, lines.length - 1);
+		const targetLine = Math.max(0, Math.min(cursor.line + direction * repeats, maxLine));
+		const desiredCol = this.modalPreferredCol ?? cursor.col;
+		const targetMaxCol = this.getModalLineMaxCol(lines[targetLine] ?? "");
+		const targetCol = Math.min(desiredCol, targetMaxCol);
+		if (targetCol < desiredCol) {
+			this.modalPreferredCol = desiredCol;
+		} else {
+			this.modalPreferredCol = null;
+		}
+		this.moveCursorTo({ line: targetLine, col: targetCol }, { preservePreferredCol: true });
+		this.resetPending();
+	}
+
+	private primeInsertSession(fallbackNormalCursor: Pos): void {
+		this.insertSessionStart = this.clonePos(this.getCursor());
+		this.insertFallbackNormalCursor = this.clonePos(fallbackNormalCursor);
+		this.insertSessionEdited = false;
+	}
+
+	private ensureInsertSession(): void {
+		if (this.mode !== "insert" || this.insertSessionStart) {
+			return;
+		}
+		this.primeInsertSession(this.getNormalCursorFromInsertPos(this.getCursor()));
+	}
+
+	private getNormalCursorFromInsertPos(pos: Pos): Pos {
+		const lines = this.getLines();
+		const maxLine = Math.max(0, lines.length - 1);
+		const line = Math.max(0, Math.min(pos.line, maxLine));
+		const lineText = lines[line] ?? "";
+		if (lineText.length === 0) {
+			return { line, col: 0 };
+		}
+		return { line, col: Math.max(0, Math.min(pos.col, lineText.length - 1)) };
+	}
+
+	private getNormalCursorAfterInsertEdit(pos: Pos): Pos {
+		const lines = this.getLines();
+		const maxLine = Math.max(0, lines.length - 1);
+		const line = Math.max(0, Math.min(pos.line, maxLine));
+		const lineText = lines[line] ?? "";
+		if (lineText.length === 0) {
+			return { line, col: 0 };
+		}
+		return { line, col: Math.max(0, Math.min(pos.col - 1, lineText.length - 1)) };
+	}
+
+	private getCurrentNormalCursor(): Pos {
+		const current = this.getCursor();
+		if (this.mode !== "insert") {
+			return this.getNormalCursorFromInsertPos(current);
+		}
+		if (this.insertSessionEdited) {
+			return this.getNormalCursorAfterInsertEdit(current);
+		}
+		if (this.insertSessionStart && !this.samePos(current, this.insertSessionStart)) {
+			return this.getNormalCursorFromInsertPos(current);
+		}
+		if (this.insertFallbackNormalCursor) {
+			return this.clonePos(this.insertFallbackNormalCursor);
+		}
+		return this.getNormalCursorFromInsertPos(current);
+	}
+
+	private enterInsertModeAtCurrentCursor(fallbackNormalCursor: Pos = this.getNormalCursorFromInsertPos(this.getCursor())): void {
+		this.mode = "insert";
+		this.primeInsertSession(fallbackNormalCursor);
+		this.resetPending();
+	}
+
+	private exitInsertMode(): void {
+		const target = this.getCurrentNormalCursor();
+		this.mode = "normal";
+		this.clearInsertSession();
+		this.resetPending();
+		this.moveCursorTo(target);
+	}
 
 	handleInput(data: string): void {
 		if (matchesKey(data, "escape")) {
 			if (this.mode === "insert") {
-				this.mode = "normal";
-				this.resetPending();
+				this.exitInsertMode();
 				return;
 			}
 
@@ -179,9 +330,14 @@ class ModalEditor extends CustomEditor {
 		}
 
 		if (this.mode === "insert") {
+			this.ensureInsertSession();
+			const beforeText = this.getText();
 			this.withTrackedEdit(() => {
 				super.handleInput(data);
 			});
+			if (this.getText() !== beforeText) {
+				this.insertSessionEdited = true;
+			}
 			return;
 		}
 
@@ -216,8 +372,7 @@ class ModalEditor extends CustomEditor {
 
 		if (data.length === 1 && data >= "0" && data <= "9") {
 			if (data === "0" && this.pendingCount.length === 0 && !this.pendingOperator && !this.pendingG) {
-				this.send(SEQ.lineStart);
-				this.resetPending();
+				this.moveToModalLineStart();
 				return;
 			}
 			this.pendingCount += data;
@@ -294,23 +449,22 @@ class ModalEditor extends CustomEditor {
 
 		switch (command) {
 			case "h":
-				this.send(SEQ.left, this.consumeCount());
+				this.moveHorizontally(this.consumeCount(), -1);
 				return;
 			case "j":
-				this.send(SEQ.down, this.consumeCount());
+				this.moveVertically(this.consumeCount(), 1);
 				return;
 			case "k":
-				this.send(SEQ.up, this.consumeCount());
+				this.moveVertically(this.consumeCount(), -1);
 				return;
 			case "l":
-				this.send(SEQ.right, this.consumeCount());
+				this.moveHorizontally(this.consumeCount(), 1);
 				return;
 			case "G":
 				this.moveToAbsoluteLine("last");
 				return;
 			case "$":
-				this.send(SEQ.lineEnd);
-				this.resetPending();
+				this.moveToLastCharOnLine();
 				return;
 			case "w":
 				this.moveSmallWordForward(this.consumeCount());
@@ -399,7 +553,7 @@ class ModalEditor extends CustomEditor {
 				this.captureDeleteToClipboard("charwise", () => {
 					this.deleteToLineEnd(this.consumeCount());
 				});
-				this.mode = "insert";
+				this.enterInsertModeAtCurrentCursor();
 				return;
 			case "S":
 				this.substituteLines(this.consumeCount());
@@ -415,17 +569,17 @@ class ModalEditor extends CustomEditor {
 				this.resetPending();
 				return;
 			case "i":
-				this.mode = "insert";
-				this.resetPending();
+				this.enterInsertModeAtCurrentCursor(this.clonePos(this.getCursor()));
 				return;
 			case "I":
 				this.enterInsertAtFirstNonBlank();
 				return;
-			case "a":
+			case "a": {
+				const fallback = this.clonePos(this.getCursor());
 				this.send(SEQ.right);
-				this.mode = "insert";
-				this.resetPending();
+				this.enterInsertModeAtCurrentCursor(fallback);
 				return;
+			}
 			case "A":
 				this.enterInsertAtLineEnd();
 				return;
@@ -532,7 +686,7 @@ class ModalEditor extends CustomEditor {
 						this.deleteVisualSelection();
 					});
 				}
-				this.mode = "insert";
+				this.enterInsertModeAtCurrentCursor();
 				return;
 			case "o": {
 				const current = this.getCursor();
@@ -544,23 +698,22 @@ class ModalEditor extends CustomEditor {
 				return;
 			}
 			case "h":
-				this.send(SEQ.left, this.consumeCount());
+				this.moveHorizontally(this.consumeCount(), -1);
 				return;
 			case "j":
-				this.send(SEQ.down, this.consumeCount());
+				this.moveVertically(this.consumeCount(), 1);
 				return;
 			case "k":
-				this.send(SEQ.up, this.consumeCount());
+				this.moveVertically(this.consumeCount(), -1);
 				return;
 			case "l":
-				this.send(SEQ.right, this.consumeCount());
+				this.moveHorizontally(this.consumeCount(), 1);
 				return;
 			case "G":
 				this.moveToAbsoluteLine("last");
 				return;
 			case "$":
-				this.send(SEQ.lineEnd);
-				this.resetPending();
+				this.moveToLastCharOnLine();
 				return;
 			case "w":
 				this.moveSmallWordForward(this.consumeCount());
@@ -953,7 +1106,8 @@ class ModalEditor extends CustomEditor {
 				this.setTextAndMoveCursor(nextText, this.indexToPos(nextText, start));
 			});
 			if (operator === "c") {
-				this.mode = "insert";
+				this.enterInsertModeAtCurrentCursor();
+				return;
 			}
 			this.resetPending();
 			return;
@@ -1110,8 +1264,7 @@ class ModalEditor extends CustomEditor {
 				if (nextLines.length === 0) nextLines.push("");
 				this.setTextAndMoveCursor(nextLines.join("\n"), { line: startLine, col: 0 });
 			});
-			this.mode = "insert";
-			this.resetPending();
+			this.enterInsertModeAtCurrentCursor();
 			return;
 		}
 
@@ -1122,7 +1275,7 @@ class ModalEditor extends CustomEditor {
 		if (result.status === "applied" && result.deleted) {
 			const text = result.linewise ? this.normalizeLinewiseRegisterText(result.deleted.deletedText) : result.deleted.deletedText;
 			this.writeClipboard(text, result.linewise ? "linewise" : "charwise");
-			this.mode = "insert";
+			this.enterInsertModeAtCurrentCursor();
 		}
 	}
 
@@ -2441,8 +2594,7 @@ class ModalEditor extends CustomEditor {
 				this.send(SEQ.deleteCharForward, repeats);
 			});
 		});
-		this.mode = "insert";
-		this.resetPending();
+		this.enterInsertModeAtCurrentCursor();
 	}
 
 	private substituteLines(count: number): void {
@@ -2457,8 +2609,7 @@ class ModalEditor extends CustomEditor {
 				this.setTextAndMoveCursor(remaining.join("\n"), { line: cursor.line, col: 0 });
 			});
 		});
-		this.mode = "insert";
-		this.resetPending();
+		this.enterInsertModeAtCurrentCursor();
 	}
 
 	private enterInsertAtFirstNonBlank(): void {
@@ -2469,14 +2620,12 @@ class ModalEditor extends CustomEditor {
 		if (firstNonBlank > 0) {
 			this.send(SEQ.right, firstNonBlank);
 		}
-		this.mode = "insert";
-		this.resetPending();
+		this.enterInsertModeAtCurrentCursor(this.clonePos(this.getCursor()));
 	}
 
 	private enterInsertAtLineEnd(): void {
 		this.send(SEQ.lineEnd);
-		this.mode = "insert";
-		this.resetPending();
+		this.enterInsertModeAtCurrentCursor();
 	}
 
 	private openLineBelow(count: number): void {
@@ -2486,8 +2635,7 @@ class ModalEditor extends CustomEditor {
 				this.send(SEQ.newLine);
 			}
 		});
-		this.mode = "insert";
-		this.resetPending();
+		this.enterInsertModeAtCurrentCursor();
 	}
 
 	private openLineAbove(count: number): void {
@@ -2498,8 +2646,7 @@ class ModalEditor extends CustomEditor {
 				this.send(SEQ.up);
 			}
 		});
-		this.mode = "insert";
-		this.resetPending();
+		this.enterInsertModeAtCurrentCursor();
 	}
 
 	private joinWithNextLine(count: number): void {
@@ -2874,8 +3021,9 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 		this.redoHistory.push(this.captureSnapshot());
-		this.restoreSnapshot(previous);
+		this.restoreSnapshotInNormalMode(previous);
 		this.mode = "normal";
+		this.clearInsertSession();
 		this.visualAnchor = null;
 		this.resetPending();
 	}
@@ -2887,8 +3035,9 @@ class ModalEditor extends CustomEditor {
 			return;
 		}
 		this.undoHistory.push(this.captureSnapshot());
-		this.restoreSnapshot(next);
+		this.restoreSnapshotInNormalMode(next);
 		this.mode = "normal";
+		this.clearInsertSession();
 		this.visualAnchor = null;
 		this.resetPending();
 	}
@@ -2897,11 +3046,16 @@ class ModalEditor extends CustomEditor {
 		return {
 			text: this.getText(),
 			cursor: this.getCursor(),
+			normalCursor: this.getCurrentNormalCursor(),
 		};
 	}
 
 	private restoreSnapshot(snapshot: Snapshot): void {
 		this.setTextAndMoveCursor(snapshot.text, snapshot.cursor);
+	}
+
+	private restoreSnapshotInNormalMode(snapshot: Snapshot): void {
+		this.setTextAndMoveCursor(snapshot.text, snapshot.normalCursor);
 	}
 
 	private withTrackedEdit(edit: () => void): void {
@@ -3151,11 +3305,16 @@ class ModalEditor extends CustomEditor {
 		return { line: lastLine, col: (lines[lastLine] ?? "").length };
 	}
 
-	private moveCursorTo(pos: Pos): void {
+	private moveCursorTo(pos: Pos, options: { preservePreferredCol?: boolean } = {}): void {
 		const lines = this.getLines();
 		const maxLine = Math.max(0, lines.length - 1);
 		const targetLine = Math.max(0, Math.min(pos.line, maxLine));
-		const targetCol = Math.max(0, Math.min(pos.col, (lines[targetLine] ?? "").length));
+		const lineText = lines[targetLine] ?? "";
+		const targetCol = Math.max(0, Math.min(pos.col, this.getModalLineMaxCol(lineText)));
+
+		if (!options.preservePreferredCol) {
+			this.clearModalPreferredCol();
+		}
 
 		const current = this.getCursor();
 		if (current.line > targetLine) this.send(SEQ.up, current.line - targetLine);
@@ -3166,6 +3325,7 @@ class ModalEditor extends CustomEditor {
 
 	private setTextAndMoveCursor(text: string, pos: Pos): void {
 		this.setText(text);
+		this.clearModalPreferredCol();
 		const lines = this.getLines();
 		const maxLine = Math.max(0, lines.length - 1);
 		const targetLine = Math.max(0, Math.min(pos.line, maxLine));
