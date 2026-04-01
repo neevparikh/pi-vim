@@ -3420,9 +3420,23 @@ class ModalEditor extends CustomEditor {
 			}
 		}
 
-		const last = lines.length - 1;
-		if (visibleWidth(lines[last]!) >= label.length) {
-			lines[last] = truncateToWidth(lines[last]!, width - label.length, "") + modeBorderColor(label);
+		const labelWidth = visibleWidth(label);
+		if (visibleWidth(lines[0]!) >= labelWidth) {
+			// Strip first labelWidth visible chars, keep the rest
+			const first = lines[0]!;
+			let skipped = 0;
+			let idx = 0;
+			while (idx < first.length && skipped < labelWidth) {
+				if (first[idx] === "\x1b") {
+					const end = first.indexOf("m", idx);
+					idx = end >= 0 ? end + 1 : idx + 1;
+				} else {
+					const graphemeWidth = visibleWidth(first[idx]!);
+					skipped += graphemeWidth || 1;
+					idx++;
+				}
+			}
+			lines[0] = modeBorderColor(label) + first.slice(idx);
 		}
 		return lines;
 	}
