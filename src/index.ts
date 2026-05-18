@@ -71,6 +71,51 @@ const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 let activeTheme: Theme | undefined;
 
+/**
+ * Optional badge state populated by the `pi-cas:fast-mode` event bus channel
+ * (see https://github.com/neevparikh/pi-cas-provider). pi-vim has no hard
+ * dependency on pi-cas-provider; if that extension isn't loaded, no event
+ * ever fires and the badge stays null. Other extensions can publish the same
+ * channel/payload shape and the badge will pick it up identically.
+ *
+ * Payload shape (mirrored from pi-cas-provider/src/badge.ts):
+ *   { intent: boolean, actual?: "on"|"off"|"cooldown", model?: string }
+ */
+interface FastModeBadgeState {
+	intent: boolean;
+	actual?: "on" | "off" | "cooldown";
+}
+let fastModeBadge: FastModeBadgeState | null = null;
+/** Bumped on every badge change so the editor knows to invalidate its render. */
+let fastModeBadgeEpoch = 0;
+
+/**
+ * Compute the glyph the editor should paint, or null when the badge is
+ * inactive. Mirrors pi-cas-provider's footer-status logic so both surfaces
+ * agree on intent vs. ground truth:
+ *
+ *   intent off                     → no glyph (return null)
+ *   intent on, actual on           → bright warning ⚡ (fast mode engaged)
+ *   intent on, actual off          → dim ⚡           (API refused — no premium charge)
+ *   intent on, actual cooldown     → error ⚡         (pool depleted)
+ *   intent on, actual unknown      → muted ⚡         (requested, no turn yet)
+ */
+function renderFastModeGlyph(theme: Theme): string | null {
+	const state = fastModeBadge;
+	if (!state?.intent) return null;
+	switch (state.actual) {
+		case "on":
+			return theme.fg("warning", "⚡");
+		case "off":
+			return theme.fg("dim", "⚡");
+		case "cooldown":
+			return theme.fg("error", "⚡");
+		case undefined:
+		default:
+			return theme.fg("muted", "⚡");
+	}
+}
+
 function isWhitespaceChar(grapheme: string): boolean {
 	return /^\s$/u.test(grapheme);
 }
@@ -3396,6 +3441,9 @@ class ModalEditor extends CustomEditor {
 		return base;
 	}
 
+	/** Last fast-mode badge epoch we rendered with, so we can re-render on change. */
+	private renderedFastBadgeEpoch = -1;
+
 	render(width: number): string[] {
 		const previousBorderColor = this.borderColor;
 		const modeBorderColor = this.getModeBorderColor(previousBorderColor);
@@ -3403,6 +3451,10 @@ class ModalEditor extends CustomEditor {
 		const lines = this.mode === "visual" || this.mode === "visual_line" ? this.renderVisualMode(width) : super.render(width);
 		this.borderColor = previousBorderColor;
 		if (lines.length === 0) return lines;
+		// Track the badge epoch we paint with so callers that diff renders know
+		// our output changed when the badge flipped (handled via tui.requestRender
+		// from the event listener; this is just bookkeeping).
+		this.renderedFastBadgeEpoch = fastModeBadgeEpoch;
 
 		let label = " INSERT ";
 		if (this.mode === "normal") {
@@ -3418,6 +3470,17 @@ class ModalEditor extends CustomEditor {
 			if (pending.length > 0) {
 				label = `${label.slice(0, -1)} [${pending}] `;
 			}
+		}
+
+		// Optional fast-mode glyph from pi-cas-provider (or any other publisher
+		// of `pi-cas:fast-mode`). Prepended *before* the mode label so the
+		// stripping arithmetic below still works on the combined string.
+		const glyph = activeTheme ? renderFastModeGlyph(activeTheme) : null;
+		if (glyph) {
+			// One space of separation between glyph and mode label, and the
+			// glyph itself sits one column in from the border so the corner
+			// glyph stays visible.
+			label = ` ${glyph}${label}`;
 		}
 
 		const labelWidth = visibleWidth(label);
@@ -3436,6 +3499,12 @@ class ModalEditor extends CustomEditor {
 					idx++;
 				}
 			}
+			// Apply mode border color to the *label text* but leave the glyph's
+			// own SGR codes untouched. Easiest way: split — color the parts of
+			// the label that aren't already SGR-styled. In practice the glyph
+			// is the only part with its own color; the rest is the mode label.
+			// We color the whole string and rely on the glyph's later SGR to
+			// override; this works because terminals process SGR sequentially.
 			lines[0] = modeBorderColor(label) + first.slice(idx);
 		}
 		return lines;
@@ -3443,8 +3512,44 @@ class ModalEditor extends CustomEditor {
 }
 
 export default function (pi: ExtensionAPI) {
+	// Track the active TUI so the fast-mode event listener (registered once at
+	// load) can request a re-render whenever the badge changes. Stored on the
+	// outer closure rather than the editor because the editor is recreated
+	// per-session via the factory below.
+	let activeTui: { requestRender: () => void } | undefined;
+
 	pi.on("session_start", (_event, ctx) => {
 		activeTheme = ctx.ui.theme;
-		ctx.ui.setEditorComponent((tui, theme, kb) => new ModalEditor(tui, theme, kb));
+		ctx.ui.setEditorComponent((tui, theme, kb) => {
+			activeTui = tui;
+			return new ModalEditor(tui, theme, kb);
+		});
+	});
+
+	// Optional integration with pi-cas-provider (or anything else that emits
+	// the same channel). No hard dependency: if no one publishes this event,
+	// the badge state stays null and no glyph is ever rendered. We don't
+	// type-import the provider — payload shape is the public contract.
+	//
+	// `pi.events` was added in a later pi-coding-agent release than the one
+	// we declare in peerDependencies, and the unit-test harness mocks pi
+	// without the bus — so we guard against its absence rather than crashing.
+	if (typeof pi.events?.on !== "function") return;
+	pi.events.on("pi-cas:fast-mode", (data) => {
+		const payload = data as { intent?: unknown; actual?: unknown; model?: unknown } | null;
+		if (!payload || typeof payload !== "object") return;
+		const intent = !!(payload as { intent?: unknown }).intent;
+		const actualRaw = (payload as { actual?: unknown }).actual;
+		const actual =
+			actualRaw === "on" || actualRaw === "off" || actualRaw === "cooldown" ? actualRaw : undefined;
+
+		const prev = fastModeBadge;
+		const changed =
+			!prev || prev.intent !== intent || prev.actual !== actual;
+		if (!changed) return;
+
+		fastModeBadge = { intent, actual };
+		fastModeBadgeEpoch += 1;
+		activeTui?.requestRender();
 	});
 }
