@@ -95,24 +95,25 @@ let fastModeBadgeEpoch = 0;
  * agree on intent vs. ground truth:
  *
  *   intent off                     → no glyph (return null)
- *   intent on, actual on           → bright warning ⚡ (fast mode engaged)
- *   intent on, actual off          → dim ⚡           (API refused — no premium charge)
- *   intent on, actual cooldown     → error ⚡         (pool depleted)
- *   intent on, actual unknown      → muted ⚡         (requested, no turn yet)
+ *   intent on, actual on           → bright warning ↯ (fast mode engaged)
+ *   intent on, actual off          → dim ↯           (API refused — no premium charge)
+ *   intent on, actual cooldown     → error ↯         (pool depleted)
+ *   intent on, actual unknown      → muted ↯         (requested, no turn yet)
  */
+const FAST_MODE_GLYPH = "↯";
 function renderFastModeGlyph(theme: Theme): string | null {
 	const state = fastModeBadge;
 	if (!state?.intent) return null;
 	switch (state.actual) {
 		case "on":
-			return theme.fg("warning", "⚡");
+			return theme.fg("warning", FAST_MODE_GLYPH);
 		case "off":
-			return theme.fg("dim", "⚡");
+			return theme.fg("dim", FAST_MODE_GLYPH);
 		case "cooldown":
-			return theme.fg("error", "⚡");
+			return theme.fg("error", FAST_MODE_GLYPH);
 		case undefined:
 		default:
-			return theme.fg("muted", "⚡");
+			return theme.fg("muted", FAST_MODE_GLYPH);
 	}
 }
 
@@ -3473,17 +3474,14 @@ class ModalEditor extends CustomEditor {
 		}
 
 		// Optional fast-mode glyph from pi-cas-provider (or any other publisher
-		// of `pi-cas:fast-mode`). Prepended *before* the mode label so the
-		// stripping arithmetic below still works on the combined string.
+		// of `pi-cas:fast-mode`). Rendered *after* coloring the mode label so
+		// the glyph's own SGR codes (including the trailing reset) don't bleed
+		// into / nuke the mode-color styling for the label text.
 		const glyph = activeTheme ? renderFastModeGlyph(activeTheme) : null;
-		if (glyph) {
-			// One space of separation between glyph and mode label, and the
-			// glyph itself sits one column in from the border so the corner
-			// glyph stays visible.
-			label = ` ${glyph}${label}`;
-		}
+		const glyphPrefix = glyph ? ` ${glyph}` : "";
+		const glyphWidth = glyph ? 1 + 1 : 0; // leading space + 1-col glyph
+		const labelWidth = visibleWidth(label) + glyphWidth;
 
-		const labelWidth = visibleWidth(label);
 		if (visibleWidth(lines[0]!) >= labelWidth) {
 			// Strip first labelWidth visible chars, keep the rest
 			const first = lines[0]!;
@@ -3499,13 +3497,11 @@ class ModalEditor extends CustomEditor {
 					idx++;
 				}
 			}
-			// Apply mode border color to the *label text* but leave the glyph's
-			// own SGR codes untouched. Easiest way: split — color the parts of
-			// the label that aren't already SGR-styled. In practice the glyph
-			// is the only part with its own color; the rest is the mode label.
-			// We color the whole string and rely on the glyph's later SGR to
-			// override; this works because terminals process SGR sequentially.
-			lines[0] = modeBorderColor(label) + first.slice(idx);
+			// Color the label text on its own so the glyph's SGR codes can't
+			// terminate the mode color partway through. Order: optional glyph
+			// (with its own SGR), then mode-colored label, then the rest of
+			// the border line.
+			lines[0] = glyphPrefix + modeBorderColor(label) + first.slice(idx);
 		}
 		return lines;
 	}
