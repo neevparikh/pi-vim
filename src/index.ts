@@ -72,7 +72,7 @@ const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 let activeTheme: Theme | undefined;
 
 /**
- * Optional badge state populated by the `pi-cas:fast-mode` event bus channel
+ * Optional badge state populated by the `pi:fast-mode` event bus channel
  * (see https://github.com/neevparikh/pi-cas-provider). pi-vim has no hard
  * dependency on pi-cas-provider; if that extension isn't loaded, no event
  * ever fires and the badge stays null. Other extensions can publish the same
@@ -3474,7 +3474,7 @@ class ModalEditor extends CustomEditor {
 		}
 
 		// Optional fast-mode glyph from pi-cas-provider (or any other publisher
-		// of `pi-cas:fast-mode`). Rendered *after* coloring the mode label so
+		// of `pi:fast-mode`). Rendered *after* coloring the mode label so
 		// the glyph's own SGR codes (including the trailing reset) don't bleed
 		// into / nuke the mode-color styling for the label text.
 		const glyph = activeTheme ? renderFastModeGlyph(activeTheme) : null;
@@ -3531,7 +3531,7 @@ export default function (pi: ExtensionAPI) {
 	// we declare in peerDependencies, and the unit-test harness mocks pi
 	// without the bus — so we guard against its absence rather than crashing.
 	if (typeof pi.events?.on !== "function") return;
-	pi.events.on("pi-cas:fast-mode", (data) => {
+	pi.events.on("pi:fast-mode", (data) => {
 		const payload = data as { intent?: unknown; actual?: unknown; model?: unknown } | null;
 		if (!payload || typeof payload !== "object") return;
 		const intent = !!(payload as { intent?: unknown }).intent;
